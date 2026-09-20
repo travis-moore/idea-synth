@@ -14,6 +14,7 @@ import type {
   Pass,
   RelationType,
 } from '../domain/vocabulary';
+import { describeRemit, type ItemPass } from '../domain/remit';
 import { SCAFFOLD_LEVELS, type ScaffoldLevel } from '../domain/scaffolding';
 import type { StructuredRequest } from './provider';
 import {
@@ -28,7 +29,7 @@ import {
   tutorMoveOutputSchema,
 } from './schemas';
 
-export const PROMPT_VERSION = '2026-09-20.1';
+export const PROMPT_VERSION = '2026-09-21.2';
 
 export interface ItemSnapshot {
   id: string;
@@ -130,7 +131,7 @@ function renderSnapshot(s: IdeaSnapshot): string {
   return [
     s.idea.originalTextOrigin === 'user'
       ? `ORIGINAL TEXT (the user's own words, never to be rewritten):\n"""${s.idea.originalText}"""`
-      : `ORIGINAL TEXT (NOT the user's words: this idea was promoted from a tangent written by the agent. Do not attribute it to the user):\n"""${s.idea.originalText}"""`,
+      : `ORIGINAL TEXT (NOT the user's words: this text was written by an agent (proposed by it, or promoted from one of its tangents). Do not attribute it to the user):\n"""${s.idea.originalText}"""`,
     `ITEMS:\n${renderItems(s.items)}`,
     `RELATIONS:\n${s.relations.map((r) => `- ${r.fromItemId} --${r.type}--> ${r.toItemId}`).join('\n') || '(none)'}`,
   ].join('\n\n');
@@ -146,17 +147,26 @@ function request<T>(
   return { pass, task, promptVersion: PROMPT_VERSION, system: SYSTEM[pass], prompt, input, schema };
 }
 
+const withRemit = (pass: ItemPass, s: IdeaSnapshot) =>
+  `${renderSnapshot(s)}\n\n${describeRemit(pass)}`;
+
 export const analysisRequests = {
   extract: (s: IdeaSnapshot) =>
-    request('extract', 'extract', extractOutputSchema, renderSnapshot(s), s),
+    request('extract', 'extract', extractOutputSchema, withRemit('extract', s), s),
   explore: (s: IdeaSnapshot) =>
-    request('explore', 'explore', exploreOutputSchema, renderSnapshot(s), s),
+    request('explore', 'explore', exploreOutputSchema, withRemit('explore', s), s),
   epistemic: (s: IdeaSnapshot) =>
-    request('epistemic', 'epistemic', epistemicOutputSchema, renderSnapshot(s), s),
+    request(
+      'epistemic',
+      'epistemic',
+      epistemicOutputSchema,
+      `${withRemit('epistemic', s)} (The remit applies to "corrections"; evidence and assessments have their own fields.)`,
+      s,
+    ),
   adversarial: (s: IdeaSnapshot) =>
-    request('adversarial', 'adversarial', adversarialOutputSchema, renderSnapshot(s), s),
+    request('adversarial', 'adversarial', adversarialOutputSchema, withRemit('adversarial', s), s),
   builder: (s: IdeaSnapshot) =>
-    request('builder', 'builder', builderOutputSchema, renderSnapshot(s), s),
+    request('builder', 'builder', builderOutputSchema, withRemit('builder', s), s),
   synthesize: (s: IdeaSnapshot) =>
     request('synthesize', 'synthesize', synthesizeOutputSchema, renderSnapshot(s), s),
 };

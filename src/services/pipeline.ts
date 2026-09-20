@@ -171,13 +171,28 @@ async function generateOrRecord<T>(
     return await ctx.provider.generate(request, { signal });
   } catch (error) {
     const message = describeFailure(error);
-    await recordUnappliedRun(ctx.db, args, 'failed', message, undefined).catch(() => undefined);
+    await recordUnappliedRun(
+      ctx.db,
+      { ...args, producer: ctx.provider.info() },
+      'failed',
+      message,
+      undefined,
+    ).catch(() => undefined);
     throw new DomainError(
       'upstream',
       `The ${labelOf(request)} pass failed and nothing was changed. ${message}`,
       error instanceof ProviderError ? { reason: error.code } : undefined,
     );
   }
+}
+
+/**
+ * Who produced the output, asked AFTER the call: only then does a provider know what it can
+ * honestly report (the model the CLI says it used, the login it verified).
+ */
+function producedBy(ctx: AppContext, meta: OperationMeta) {
+  const producer = ctx.provider.info();
+  return { producer, meta: { ...meta, agentName: producer.name, agentModel: producer.model } };
 }
 
 /** Provider paths report rejected output as an upstream failure (HTTP 502), not a bad request. */
@@ -206,7 +221,12 @@ export async function commitPass<T, R>(
     output = (request.schema as z.ZodType<T>).parse(args.raw);
   } catch (error) {
     const message = describeFailure(error);
-    await recordUnapplied('failed', message, undefined);
+    // The rejected output is kept on the failed run: it is what a prompt or schema fix needs.
+    await recordUnapplied(
+      'failed',
+      message,
+      args.raw === undefined ? undefined : { rejected: args.raw },
+    );
     throw invalid(
       `The ${labelOf(request)} output was rejected and nothing was changed. ${message}`,
     );
@@ -301,7 +321,9 @@ export async function executePass<T, R>(
   };
   const raw = await generateOrRecord(ctx, commitArgs, request, options.signal);
   try {
-    return (await commitPass(ctx.db, { ...commitArgs, raw }, apply)).result;
+    return (
+      await commitPass(ctx.db, { ...commitArgs, ...producedBy(ctx, commitArgs.meta), raw }, apply)
+    ).result;
   } catch (error) {
     asUpstream(error);
   }
@@ -508,7 +530,8 @@ async function runPass(ctx: AppContext, ideaId: string, pass: WorkflowPass, opti
     options.signal,
   );
   try {
-    await commitWorkflowPass(ctx.db, prepared, raw, info, meta, options);
+    const after = producedBy(ctx, meta);
+    await commitWorkflowPass(ctx.db, prepared, raw, after.producer, after.meta, options);
   } catch (error) {
     asUpstream(error);
   }

@@ -43,6 +43,30 @@ reasoning, why, and what kind of answer would help) and **move** (produce the ne
 the level the policy selected_). A model that supplies an answer below level 5 fails
 validation.
 
+## A turn never loses the user's answer
+
+```mermaid
+stateDiagram-v2
+  [*] --> move: session created
+  move --> answer: tutor's move committed (question / options / teaching)
+  move --> premise: level 5 - agent-supplied premise
+  answer --> assessment: user's answer STORED, exact text (no model involved yet)
+  assessment --> move: assessment committed (level chosen by code)
+  assessment --> assessment: assessment failed - answer still there, retry assessment
+  move --> move: move failed - retry (continue)
+  premise --> move: accept / reject / change
+  move --> [*]: tutor has no more questions, or hand-off
+```
+
+`pendingTask` on the session DTO is derived from the transcript, so it cannot drift. A
+second answer is refused while one is pending assessment; an assessment is applied only if
+the answer is still unassessed (checked in the commit transaction), so neither a retry nor
+two racing assessors can advance the session twice. The assessment is its own `feedback`
+step pointing at the answer (`responds_to_step_id`); the answer row is never modified.
+
+The same state machine serves every reasoner: the configured provider (web UI, as a job),
+or the VS Code agent (`guided.next` → `guided.submit`), always at the level the code chose.
+
 ## What is recorded
 
 `guided_steps` is the complete transcript: author, step kind (`question`, `answer`,

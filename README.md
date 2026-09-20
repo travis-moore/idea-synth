@@ -21,17 +21,34 @@ Two rules drive the design:
 - **Generate freely, evaluate explicitly, preserve provenance.**
 - **Being wrong should be cheap, but believing something without examining it should be visible.**
 
+## How it is meant to be used
+
+1. You talk an idea through with **Claude Code or Codex in its VS Code panel**.
+2. That agent does the reasoning itself and records it through the `synth` CLI, which
+   validates everything ([docs/agent-workflow.md](docs/agent-workflow.md)). No API key, no
+   second model.
+3. The **web page is a live view**: the graph of linked reasoning nodes, each with its
+   content, authorship, discussion, decisions, evidence and history. It updates as the
+   agent writes, on a desktop or a phone.
+4. Optionally, the same workflow can be driven from the web page by a local agent under
+   your own Claude subscription ([docs/local-agent.md](docs/local-agent.md)), or by the
+   clearly labelled demo mock.
+
 ## Quick start
 
 ```bash
 npm install        # Node >= 20.19
-npm run dev        # http://localhost:5173
+npm run dev        # live view on http://127.0.0.1:5173 (viewer mode)
+bin/synth help     # what a VS Code agent can do
+npm run dev:demo   # or: try the whole workflow in the browser with labelled mock data
 ```
 
-No API key needed. The default AI provider is a deterministic mock, and the database is
-seeded with a demo idea (the pyramids example) and a guided session (the "robots mean
-nobody has to work" hypothesis). See [docs/development.md](docs/development.md) for a
-five-minute tour and for switching to a live model.
+Then, in a Claude Code or Codex panel: _"Use Idea Synth (`~/idea-synth/bin/synth`, read
+`docs/agent-workflow.md` first) to help me develop this idea: ..."_
+
+No API key is needed for any of this. A fresh database is seeded with a demo idea (the
+pyramids example) and a guided session ("robots mean nobody has to work"). See
+[docs/development.md](docs/development.md) for a tour.
 
 ## What it does
 
@@ -60,18 +77,22 @@ with every line traced to its sources.
 A modular monolith in TypeScript: Hono API, SQLite through Kysely, React + React Flow,
 Vitest. History tables are append-only and the captured idea and item authorship are
 immutable **at the database level** (triggers). All AI output is schema-validated before
-anything is written, and the model provider is pluggable (mock and Anthropic included).
+anything is written, whoever produced it: the VS Code agent through the CLI, a local
+subscription worker, the API provider or the mock. Results computed from an idea that has
+since changed are refused (input versions), and web-triggered work runs as durable jobs.
 
-| Read                                                     | For                                                    |
-| -------------------------------------------------------- | ------------------------------------------------------ |
-| [docs/architecture.md](docs/architecture.md)             | Layers, request lifecycle, configuration               |
-| [docs/adr/0001-stack.md](docs/adr/0001-stack.md)         | Why this stack; the PostgreSQL path                    |
-| [docs/domain-model.md](docs/domain-model.md)             | Entities, authorship, relation types, provenance model |
-| [docs/workflow.md](docs/workflow.md)                     | The eight stages, review gate, lifecycle diagram       |
-| [docs/guided-development.md](docs/guided-development.md) | Adaptive scaffolding                                   |
-| [docs/ai-providers.md](docs/ai-providers.md)             | Provider abstraction, passes, validation, mock vs live |
-| [docs/development.md](docs/development.md)               | Setup, commands, migrations, testing                   |
-| [docs/roadmap.md](docs/roadmap.md)                       | Known gaps and next steps                              |
+| Read                                                     | For                                                                               |
+| -------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| [docs/architecture.md](docs/architecture.md)             | Layers, request lifecycle, configuration                                          |
+| [docs/adr/0001-stack.md](docs/adr/0001-stack.md)         | Why this stack; the PostgreSQL path                                               |
+| [docs/domain-model.md](docs/domain-model.md)             | Entities, authorship, relation types, provenance model                            |
+| [docs/workflow.md](docs/workflow.md)                     | The eight stages, review gate, lifecycle diagram                                  |
+| [docs/guided-development.md](docs/guided-development.md) | Adaptive scaffolding                                                              |
+| [docs/ai-providers.md](docs/ai-providers.md)             | Provider abstraction, passes, validation, mock vs live                            |
+| [docs/agent-workflow.md](docs/agent-workflow.md)         | **Using it from Claude Code / Codex**: rules, CLI, end-to-end examples            |
+| [docs/local-agent.md](docs/local-agent.md)               | Optional web reasoning via your Claude subscription; durable jobs; local security |
+| [docs/development.md](docs/development.md)               | Setup, commands, migrations, testing                                              |
+| [docs/roadmap.md](docs/roadmap.md)                       | Known gaps and next steps                                                         |
 
 ## Working on this repository
 
@@ -84,6 +105,6 @@ first. It is the single source of instructions; `AGENTS.md` only points to it.
 
 ## Status
 
-Early, single-user, local-first. No authentication. The live Anthropic provider is
-implemented and unit-tested with a faked client but has not yet been run against the real
-API. The demo content illustrates the workflow; it does not assert historical facts.
+Early, single-user, local-first; the server binds to loopback and has no user accounts.
+What has and has not been verified live is listed in [docs/roadmap.md](docs/roadmap.md).
+The demo content illustrates the workflow; it does not assert historical facts.

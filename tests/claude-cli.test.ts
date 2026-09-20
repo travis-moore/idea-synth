@@ -5,9 +5,11 @@ import { z } from 'zod';
 import { ProviderError } from '../src/ai';
 import {
   ClaudeCodeCliProvider,
+  cliSchema,
   type ChildLike,
   type SpawnLike,
 } from '../src/ai/providers/claude-cli';
+import { epistemicOutputSchema } from '../src/ai/schemas';
 
 const request = {
   pass: 'discuss' as const,
@@ -135,7 +137,8 @@ describe('claude-code-cli provider (fake child processes)', () => {
     expect(job!.command).toBe('claude');
     expect(job!.shell).toBe(false);
     // User text never reaches the command line.
-    expect(job!.stdin).toBe(request.prompt);
+    expect(job!.stdin.startsWith(request.prompt)).toBe(true);
+    expect(job!.stdin).toContain('OUTPUT CONTRACT');
     expect(job!.args.join(' ')).not.toContain('rm -rf');
     const flag = (name: string) => job!.args[job!.args.indexOf(name) + 1];
     expect(job!.args).toEqual(
@@ -257,5 +260,23 @@ describe('claude-code-cli provider (fake child processes)', () => {
     const e = await expectCode(pending, 'cancelled');
     expect(e.message).toMatch(/Cancelled by the user/);
     expect(cancelled.calls[1]!.killed).toContain('SIGTERM');
+  });
+
+  it('sends the CLI a schema without the keywords that make it ignore the schema', () => {
+    const text = JSON.stringify(cliSchema(z.toJSONSchema(epistemicOutputSchema, { io: 'input' })));
+    for (const keyword of [
+      '"$schema"',
+      '"format"',
+      '"maxLength"',
+      '"minLength"',
+      '"default"',
+      '"minItems"',
+    ])
+      expect(text).not.toContain(keyword);
+    // Structure survives, including a property that happens to be called like a keyword.
+    expect(text).toContain('"assessments"');
+    expect(cliSchema({ properties: { default: { type: 'string', maxLength: 3 } } })).toEqual({
+      properties: { default: { type: 'string' } },
+    });
   });
 });

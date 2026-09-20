@@ -28,12 +28,16 @@ erDiagram
   GUIDED_SESSIONS ||--o{ GUIDED_STEPS : transcript
   GUIDED_STEPS }o--o| REASONING_ITEMS : "may create"
   IDEAS ||--o{ EVENTS : "audit log"
+  IDEAS ||--o{ OPERATIONS : "client operations (envelope)"
+  OPERATIONS ||--o{ EVENTS : "tags what it caused"
+  IDEAS ||--o{ JOBS : "web work queue (MUTABLE, not history)"
 
   IDEAS {
     text id PK
     text original_text "IMMUTABLE"
     text source "captured | guided | promoted_tangent"
     text stage "guided | captured | in_review | synthesized"
+    int revision "input version"
     text source_item_id "tangent it grew from"
   }
   REASONING_ITEMS {
@@ -70,6 +74,15 @@ erDiagram
     text status "completed | failed"
     text input_json
     text output_json
+  }
+  OPERATIONS {
+    text request_id "idempotency key"
+    text client "web | cli | worker"
+    text executed_by "user | agent | system"
+    text agent_name
+    text user_instruction "the user's own words"
+    int input_version
+    text status "applied | rejected"
   }
   EVENTS {
     int seq PK
@@ -163,6 +176,36 @@ self-contained.
 Triggers abort UPDATE/DELETE on every table in the middle column, on
 `ideas.original_text`, and on an item's `origin`/`kind`. See
 [ADR 0001](adr/0001-stack.md) for why this is event-_logged_ rather than event-_sourced_.
+
+## Author, approver, executor
+
+Three facts about "who", stored separately and never merged:
+
+| Fact         | Question                                   | Where                                                                                                                                                    |
+| ------------ | ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Author**   | Whose words are these?                     | `reasoning_items.origin` (frozen); `author` on revisions, messages, relations                                                                            |
+| **Approver** | Who made this judgement call?              | `decisions.author` — always `user` for accept / qualify / reject / split / merge / supersede; the agent may only flag or set aside                       |
+| **Executor** | Who performed the operation, through what? | `operations` (client `web`/`cli`/`worker`, session, `executed_by`, agent name, self-reported model, contract version), linked from `events.operation_id` |
+
+When an agent executes a user's decision, `decisions.relayed_by` names the agent and
+`decisions.user_instruction` keeps the user's own words; without them the operation is
+refused. Text the agent wrote stays `origin = agent` through any amount of approval or
+restructuring: a user-approved split can have agent-authored children, a user-approved
+supersede can install an agent-authored formulation. An agent may reword only items it
+originated. User-authored text (captures, answers, messages, user-written items) is stored
+byte for byte; only emptiness is validated.
+
+## Input versions and operations
+
+`ideas.revision` increases with every state-changing event, in the same transaction.
+Anything computed from the idea records the version it read (`analysis_runs.input_version`,
+`operations.input_version`) and is applied only if the idea is still at that version.
+Output that arrives too late is stored as an `analysis_runs` row with `status = 'stale'`
+(plus a rejected `operations` row): history, never current reasoning.
+
+`operations.request_id` is unique among applied operations: repeating a request returns the
+stored result instead of applying it again. `jobs` (the web work queue) is mutable
+operational state and is not part of the provenance model.
 
 ## Answering the provenance questions
 

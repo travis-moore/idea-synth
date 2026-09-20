@@ -22,7 +22,10 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "check": "npm run format:check && npm run lint && npm run typecheck && npm run test"
+    "check": "npm run format:check && npm run lint && npm run typecheck && npm run test",
+    "synth": "tsx src/cli/main.ts",
+    "agent:check": "tsx src/cli/agent-check.ts",
+    "dev:demo": "IDEA_SYNTH_PROVIDER=mock npm run dev"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.127.0",
@@ -55,5 +58,8 @@
     "typescript-eslint": "^8.70.0",
     "vite": "^8.3.0",
     "vitest": "^4.1.11"
+  },
+  "bin": {
+    "synth": "bin/synth"
   }
 }

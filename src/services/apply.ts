@@ -14,7 +14,9 @@ import { DomainError, invalid } from '../domain/errors';
 import { newId } from '../domain/ids';
 import { locateQuote } from '../domain/quotes';
 import { evaluateReviewGate } from '../domain/rules';
-import { EXTRACTABLE_KINDS, type ItemKind, type RelationType } from '../domain/vocabulary';
+
+export type { ItemPass } from '../domain/remit';
+import { ALLOWED_KINDS, ALLOWED_LINKS, INBOUND_LINKS, type ItemPass } from '../domain/remit';
 import { setStage } from './ideas';
 import {
   createItem,
@@ -26,52 +28,6 @@ import {
 } from './store';
 
 type Trx = Transaction<Database>;
-
-/** What each pass is allowed to add. A model that strays outside fails validation. */
-const ALLOWED_KINDS: Record<
-  'extract' | 'explore' | 'epistemic' | 'adversarial' | 'builder',
-  readonly ItemKind[]
-> = {
-  extract: EXTRACTABLE_KINDS,
-  explore: ['implication', 'extension', 'question', 'analogy', 'hypothesis'],
-  epistemic: ['correction'],
-  adversarial: ['objection', 'question', 'assumption', 'uncertainty'],
-  builder: [
-    'hypothesis',
-    'example',
-    'test',
-    'distinction',
-    'question',
-    'implication',
-    'extension',
-    'inference',
-  ],
-};
-
-export type ItemPass = keyof typeof ALLOWED_KINDS;
-
-/**
- * Edge types a model may write. Structural genealogy (`supersedes`, `merged_into`,
- * `branches_to`, `synthesized_into`, `answers`) and evidence edges are only ever written
- * by the application as part of the operation they record, never on a model's say-so.
- */
-const COMMON_LINKS: readonly RelationType[] = [
-  'derived_from',
-  'supports',
-  'contradicts',
-  'qualifies',
-  'questions',
-  'assumes',
-];
-const ALLOWED_LINKS: Record<ItemPass, readonly RelationType[]> = {
-  extract: COMMON_LINKS,
-  explore: [...COMMON_LINKS, 'tangent_of'],
-  epistemic: [...COMMON_LINKS, 'corrects'],
-  adversarial: COMMON_LINKS,
-  builder: COMMON_LINKS,
-};
-/** Only `assumes` may point *at* the new item (an existing claim assumes a new assumption). */
-const INBOUND_LINKS: readonly RelationType[] = ['assumes'];
 
 /** Resolve a model-supplied reference: a key from this output, or an existing item id. */
 function resolver(existingIds: Set<string>, keyToId: Map<string, string>) {

@@ -83,16 +83,49 @@ again resumes from the first pass that has not completed.
 
 ## Runtime configuration
 
-| Variable              | Default                    | Meaning                                     |
-| --------------------- | -------------------------- | ------------------------------------------- |
-| `IDEA_SYNTH_PROVIDER` | `mock`                     | `mock` or `anthropic`                       |
-| `ANTHROPIC_API_KEY`   | —                          | Needed only for `anthropic`                 |
-| `IDEA_SYNTH_MODEL`    | `claude-opus-5`            | Model id for the live provider              |
-| `IDEA_SYNTH_DB`       | `./data/idea-synth.sqlite` | SQLite file, or `:memory:`                  |
-| `IDEA_SYNTH_SEED`     | on                         | Set `off` to skip seeding an empty database |
-| `PORT`                | `8787`                     | API port                                    |
+| Variable                                               | Default                    | Meaning                                                                                     |
+| ------------------------------------------------------ | -------------------------- | ------------------------------------------------------------------------------------------- |
+| `IDEA_SYNTH_PROVIDER`                                  | `none`                     | Web reasoning: `none` (viewer), `mock`, `claude-cli`, `anthropic`. No fallback between them |
+| `IDEA_SYNTH_MODEL`                                     | provider default           | Model alias/id for `claude-cli` or `anthropic`                                              |
+| `IDEA_SYNTH_CLAUDE_BIN`, `IDEA_SYNTH_AGENT_TIMEOUT_MS` | `claude`, 8 min            | `claude-cli` provider                                                                       |
+| `ANTHROPIC_API_KEY`                                    | —                          | Only for `anthropic`; withheld from the `claude-cli` child                                  |
+| `IDEA_SYNTH_DB`                                        | `./data/idea-synth.sqlite` | SQLite file shared by server, workers and CLI (relative to the repo root)                   |
+| `IDEA_SYNTH_JOB_CONCURRENCY`                           | `2`                        | Parallel jobs (never more than one per idea)                                                |
+| `IDEA_SYNTH_SEED`                                      | on                         | Set `off` to skip seeding an empty database                                                 |
+| `HOST` / `PORT`                                        | `127.0.0.1` / `8787`       | Loopback by default; there are no user accounts                                             |
+
+## Clients, and the one way reasoning gets in
+
+```mermaid
+flowchart LR
+  subgraph reasoners["Who can produce a pass"]
+    V["VS Code agent<br/>(reasons in its own conversation)"]
+    P["configured provider<br/>mock · claude-cli · anthropic"]
+  end
+  V -->|"synth passes.next → JSON contract<br/>synth passes.submit"| C
+  P -->|"job runner → executePass"| C
+  C["commitPass<br/>1 zod validation<br/>2 BEGIN IMMEDIATE<br/>3 input version == read version ?<br/>4 still the legal next pass ? gate ?<br/>5 run row + apply + events"] --> DB[("SQLite")]
+  C -. "too late → 'stale' run, not applied" .-> DB
+```
+
+- **Input versions.** `ideas.revision` is bumped by every state-changing event. A pass is
+  prepared at a version and committed only if the idea is still there; the comparison and
+  the writes share one `BEGIN IMMEDIATE` transaction, so it holds across processes (server,
+  workers, CLI invocations) and against the user's own concurrent decisions. No transaction
+  is ever open during a model call.
+- **Operations.** Every client action runs through `applyOperation`, which records an
+  append-only envelope (client, session, executor, agent, request id, input version, the
+  user's instruction, outcome) and tags every event it causes. Request ids make retries
+  idempotent; rejected and stale attempts are kept.
+- **Jobs.** Reasoning requested from the browser is a row in the mutable `jobs` table,
+  run by an in-process runner (bounded concurrency, one per idea, heartbeat, timeout,
+  cancel, recovery after restart). See [local-agent.md](local-agent.md).
+- **Live view.** The web client polls `GET /api/changes` (one revision number per idea
+  plus the active job count) while visible and refetches only what moved.
+- **Local security.** Loopback bind; Host, Origin and Sec-Fetch-Site checks; a per-install
+  token on every non-GET; no CORS; no endpoint that takes a command or a path.
 
 ## What is deliberately absent
 
-Authentication, multi-user support, background job queues, streaming, deployment
-infrastructure, and web search for evidence. See [roadmap](roadmap.md).
+User accounts, multi-user support, streaming, deployment infrastructure, an MCP server
+(the agent API is shaped for one), a Codex subscription adapter, and web search for evidence. See [roadmap](roadmap.md).

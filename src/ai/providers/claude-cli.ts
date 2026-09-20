@@ -91,6 +91,42 @@ export interface ClaudeCliOptions {
   env?: NodeJS.ProcessEnv | undefined;
 }
 
+/**
+ * JSON Schema keywords the CLI's structured-output validator does not accept. With any of
+ * them present it silently ignores the whole schema (observed on 2.1.x: the model then
+ * answers in a shape of its own). They only tighten values, so dropping them is safe: the
+ * full zod contract is applied to whatever comes back.
+ */
+const UNSUPPORTED_KEYWORDS = new Set([
+  '$schema',
+  'format',
+  'pattern',
+  'default',
+  'minLength',
+  'maxLength',
+  'minItems',
+  'maxItems',
+  'minimum',
+  'maximum',
+  'exclusiveMinimum',
+  'exclusiveMaximum',
+]);
+
+export function cliSchema(schema: unknown): unknown {
+  if (Array.isArray(schema)) return schema.map(cliSchema);
+  if (schema === null || typeof schema !== 'object') return schema;
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(schema)) {
+    // `properties` maps property NAMES to schemas: a property may legitimately be called "default".
+    if (key === 'properties' && value && typeof value === 'object')
+      out[key] = Object.fromEntries(
+        Object.entries(value).map(([name, sub]) => [name, cliSchema(sub)]),
+      );
+    else if (!UNSUPPORTED_KEYWORDS.has(key)) out[key] = cliSchema(value);
+  }
+  return out;
+}
+
 function safeJson(text: string): unknown {
   try {
     return JSON.parse(text);
@@ -189,7 +225,6 @@ export class ClaudeCodeCliProvider implements ModelProvider {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        if (killTimer) clearTimeout(killTimer);
         signal?.removeEventListener('abort', onAbort);
         fn();
       };
@@ -243,7 +278,11 @@ export class ClaudeCodeCliProvider implements ModelProvider {
           ),
         ),
       );
-      child.on('close', (code) => finish(() => resolve({ code, stdout, stderr })));
+      child.on('close', (code) => {
+        // Only now is the process really gone; until then the SIGKILL escalation stays armed.
+        if (killTimer) clearTimeout(killTimer);
+        finish(() => resolve({ code, stdout, stderr }));
+      });
       child.stdin?.end(stdin);
     });
   }
@@ -296,13 +335,17 @@ export class ClaudeCodeCliProvider implements ModelProvider {
     options: GenerateOptions = {},
   ): Promise<unknown> {
     await this.checkAuth(options.signal);
-    const schema = z.toJSONSchema(request.schema, { io: 'input' });
+    const full = z.toJSONSchema(request.schema, { io: 'input' });
+    const schema = JSON.stringify(cliSchema(full));
+    // The schema also goes into the prompt: enforcement by the CLI is best-effort, and a
+    // model that cannot see the contract cannot follow it.
+    const prompt = `${request.prompt}\n\nOUTPUT CONTRACT: answer with ONE JSON object and nothing else. It must satisfy this JSON Schema exactly (use these property names; do not invent others):\n${JSON.stringify(full)}`;
     const args = [
       '-p',
       '--output-format',
       'json',
       '--json-schema',
-      JSON.stringify(schema),
+      schema,
       '--system-prompt',
       request.system,
       '--tools',
@@ -316,7 +359,7 @@ export class ClaudeCodeCliProvider implements ModelProvider {
       randomUUID(), // an explicit, fresh identity for this one job
       ...(this.requestedModel ? ['--model', this.requestedModel] : []),
     ];
-    const { code, stdout, stderr } = await this.run(args, request.prompt, options.signal);
+    const { code, stdout, stderr } = await this.run(args, prompt, options.signal);
 
     const parsed = envelopeSchema.safeParse(safeJson(stdout));
     const envelope = parsed.success ? parsed.data : null;
@@ -345,10 +388,16 @@ export class ClaudeCodeCliProvider implements ModelProvider {
     }
     const reported = Object.keys(envelope.modelUsage ?? {});
     if (reported.length > 0) this.reportedModel = reported.join('+');
-    if (envelope.structured_output === undefined || envelope.structured_output === null)
+    // Still unvalidated either way: commitPass applies the shared contracts.
+    if (envelope.structured_output !== undefined && envelope.structured_output !== null)
+      return envelope.structured_output;
+    const fromText = safeJson(
+      (envelope.result ?? '').trim().replace(/^```(?:json)?\s*|\s*```$/g, ''),
+    );
+    if (fromText === null)
       throw new ProviderError('The local agent returned no structured output.', {
         code: 'invalid_output',
       });
-    return envelope.structured_output; // still unvalidated: commitPass applies the shared contracts
+    return fromText;
   }
 }

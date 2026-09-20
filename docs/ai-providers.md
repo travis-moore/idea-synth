@@ -34,9 +34,9 @@ philosophy. `PROMPT_VERSION` is stored on every run; bump it when wording change
 
 ## Validation
 
-`executePass` (`src/services/pipeline.ts`) treats every provider the same way:
+`commitPass` (`src/services/pipeline.ts`) treats every reasoner the same way:
 
-1. `provider.generate(request)` → unknown
+1. output arrives as `unknown` (from `provider.generate`, or from `passes.submit`)
 2. `request.schema.parse(...)` — shape, enums, required provenance
 3. semantic checks while applying: every reference must be an existing item of this idea
    or a key from the same output; kinds **and edge types** must be within the pass's remit
@@ -44,33 +44,36 @@ philosophy. `PROMPT_VERSION` is stored on every run; bump it when wording change
    `answers` or evidence edges, and only `assumes` may point at a new item); non-extract
    items must link to what they arose from; extracted items need a quote that is really in
    the user's text to count as the user's; a supplied premise is only legal at level 5
-4. apply in **one transaction** with the `analysis_runs` row
+4. in **one `BEGIN IMMEDIATE` transaction**: the idea must still be at the input version
+   the request was built from (else a `stale` run is recorded and nothing is applied), the
+   pass must still be the legal next one, the review gate must hold; then the run row and
+   the changes are written together
 
 Any failure rolls the pass back and records a `failed` run with the reason. The API
 answers 502 with a readable message. Nothing is parsed out of prose.
 
-## Providers
+## Reasoners
 
-**`MockProvider`** (`src/ai/mock/`, default). Deterministic, offline, free. It is what
-demo mode and the whole test suite use.
+Validation and application do not care who reasoned. There are two kinds of reasoner:
 
-- Ideas mentioning "pyramid" get a hand-written fixture (`pyramids.ts`) showing every
-  feature: a probably-false causal premise with a surviving question, a disputed
-  correction, a value judgement needing the user, an ambiguity, objections, a hidden
-  assumption, placeholder evidence and a tangent. Its verdicts are illustrative and say so.
-- Any other text gets honest heuristics (`generic.ts`): sentence splitting, keyword
-  classification, and clearly `[mock]`-labelled placeholder questions.
-- Builder and Synthesis (`synthesis.ts`) are **state-driven**: they read what the user
-  actually accepted, qualified and rejected. With nothing accepted, the mock says there is
-  no conclusion yet. It never reports confidence above `moderate`.
+- **The external agent** (Claude Code or Codex in a VS Code panel). It gets a pass contract
+  from `synth passes.next`, reasons in its own conversation, and submits with
+  `synth passes.submit`. Runs are recorded with `provider = <agent name>`,
+  `model_source = self_reported`, `auth_mode = external_session`. See
+  [agent-workflow.md](agent-workflow.md). This is the primary path and needs no provider.
+- **A configured provider**, used only for web-triggered work (as durable jobs):
 
-**`AnthropicProvider`** (`src/ai/providers/anthropic.ts`). Uses the official SDK with
-structured outputs (`output_config.format = zodOutputFormat(schema)`), default model
-`claude-opus-5` (override with `IDEA_SYNTH_MODEL`). Refusals, truncation, API errors and
-non-JSON become `ProviderError`s. Unit-tested with a faked SDK client, and a test checks
-that every pass schema converts to the JSON-schema format. **It has not been exercised
-against the live API** (no key was available when it was written), so expect to tune
-prompts and possibly schema constraints on first real use.
+| Provider                                 | Notes                                                                                                                                                                                                                           |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `none` (default)                         | Viewer mode. `canReason = false`; reasoning endpoints answer 409.                                                                                                                                                               |
+| `mock` (`src/ai/mock/`)                  | Deterministic, offline, labelled demo data; what the test suite uses. Pyramids fixture, honest `[mock]` heuristics for other text, state-driven Builder/Synthesis that never reports confidence above `moderate`.               |
+| `claude-cli` (`providers/claude-cli.ts`) | The user's installed Claude Code CLI, headless, under their subscription login: no tools, no settings, billing env withheld, login verified through the CLI. **Verified live** (see roadmap). [local-agent.md](local-agent.md). |
+| `anthropic` (`providers/anthropic.ts`)   | Official SDK, structured outputs, default `claude-opus-5`. Unit-tested with a faked client; **never run against the live API**.                                                                                                 |
+
+There is no fallback between providers. Every provider reports `info()` (name, model, how
+the model name is known, auth mode; never a secret), honours an `AbortSignal`, and fails
+with a `ProviderError` code (`not_logged_in`, `wrong_auth_mode`, `usage_limit`,
+`invalid_output`, `process_failed`, `timeout`, `cancelled`, ...).
 
 ## Adding or routing providers
 

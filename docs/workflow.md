@@ -101,6 +101,9 @@ person, and distinguishes _wrong_ from _insufficiently supported_.
 `premise_needs_response`, `decision_required`). Each item has its own persistent discussion
 thread. `needs_user` items block Steps 6–8; `open` items do not (they surface as open
 questions). The user may override the gate; the override is logged as `gate.overridden`.
+An override **names the blocking items the user was shown** and authorises only those: if
+another item starts needing the user afterwards, the gate closes again, for every client.
+When an agent relays an override it must carry the user's own words.
 The binding gate check happens **inside the transaction that commits the synthesis**, so
 an item that starts needing the user while the model is working still blocks, and an
 override is only ever recorded together with the synthesis it authorised.
