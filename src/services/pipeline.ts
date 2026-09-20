@@ -38,9 +38,11 @@ import {
   applyNewItems,
   applySynthesis,
   enforceGate,
+  recordGateOverride,
   type GateOverride,
 } from './apply';
 import type { AppContext } from './context';
+import { guardGuidedHandoff } from './guided';
 import { setStage } from './ideas';
 import { applyOperation, StaleInputError, type OperationMeta } from './operation';
 import { buildSnapshot } from './queries';
@@ -89,6 +91,8 @@ export interface CommitArgs<T> {
   /** False only for passes that add to a thread rather than compute from state (discussion). */
   checkVersion: boolean;
   meta: OperationMeta;
+  /** Distinguishes otherwise identical requests within an idea (e.g. a guided session id). */
+  scope?: string | undefined;
   startedAt?: string;
   /**
    * Checked inside the commit transaction BEFORE the run is recorded as completed (e.g. is
@@ -239,6 +243,13 @@ export async function commitPass<T, R>(
         name: `pass.${request.pass}.${request.task}`,
         ideaId,
         meta: { ...args.meta, inputVersion: args.checkVersion ? args.readVersion : undefined },
+        input: {
+          pass: request.pass,
+          task: request.task,
+          readVersion: args.readVersion,
+          raw: args.raw,
+          scope: args.scope ?? null,
+        },
       },
       async (trx) => {
         await args.guard?.(trx);
@@ -431,7 +442,11 @@ export async function commitWorkflowPass(
       readVersion: prepared.inputVersion,
       checkVersion: true,
       meta,
-      guard: (trx) => assertLegal(trx, ideaId, pass),
+      guard: async (trx) => {
+        await assertLegal(trx, ideaId, pass);
+        if ((await requireIdea(trx, ideaId)).stage === 'guided')
+          await guardGuidedHandoff(trx, ideaId);
+      },
     },
     async (trx, output, runId) => {
       const idea: IdeasTable = await requireIdea(trx, ideaId);
@@ -467,7 +482,15 @@ export async function commitWorkflowPass(
           return { created };
         }
         case 'builder':
-          await enforceGate(trx, ideaId, options.override);
+          // Step 6 also runs past the gate, so the override is recorded here too.
+          await recordGateOverride(
+            trx,
+            ideaId,
+            runId,
+            'builder',
+            await enforceGate(trx, ideaId, options.override),
+            options.override,
+          );
           return {
             created: await applyNewItems(
               trx,

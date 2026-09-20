@@ -25,6 +25,11 @@ export interface SecurityConfig {
   allowedHosts: string[];
   /** Origins allowed to call us (the API's own origin and the Vite dev server). */
   allowedOrigins: string[];
+  /**
+   * Headers can be forged by anything that is not a browser. Unless this is set, the token
+   * and every state change are additionally restricted to connections FROM loopback.
+   */
+  allowRemotePeers?: boolean;
 }
 
 /** A per-installation token, kept in a user-only file next to the database. */
@@ -79,6 +84,11 @@ export function guard(config: SecurityConfig): MiddlewareHandler {
       return c.json(deny('forbidden', 'Cross-site requests are not accepted.'), 403);
 
     const safe = c.req.method === 'GET' || c.req.method === 'HEAD';
+    const peer = (c.env as { incoming?: { socket?: { remoteAddress?: string } } } | undefined)
+      ?.incoming?.socket?.remoteAddress;
+    const remotePeer = peer !== undefined && !/^(127\.|::1$|::ffff:127\.)/.test(peer);
+    if (remotePeer && !config.allowRemotePeers && (!safe || c.req.path.endsWith('/session')))
+      return c.json(deny('forbidden', 'Only connections from this machine may do that.'), 403);
     if (!safe && !sameToken(c.req.header(TOKEN_HEADER), config.token))
       return c.json(deny('unauthorized', 'Missing or wrong session token.'), 401);
     return next();

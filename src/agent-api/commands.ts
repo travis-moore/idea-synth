@@ -21,7 +21,7 @@ import { PREMISE_STANCES } from '../domain/scaffolding';
 import { authorSchema, decisionTypeSchema, itemKindSchema } from '../domain/vocabulary';
 import type { GateOverride } from '../services/apply';
 import {
-  assertReadyForHandoff,
+  assertNoUnansweredPremise,
   commitGuidedTask,
   createGuidedSession,
   findSessionByIdea,
@@ -104,6 +104,12 @@ const toOperationMeta = (meta: Meta, inputVersion?: number): OperationMeta => ({
   userInstruction: meta.userInstruction,
   inputVersion,
 });
+
+/** What was asked, without the envelope: the basis of the request fingerprint. */
+function payloadOf(input: object): unknown {
+  const { meta: _meta, ...rest } = input as { meta?: unknown };
+  return rest;
+}
 
 const producerOf = (meta: Meta): Producer => ({
   name: meta.agent,
@@ -290,7 +296,12 @@ export const commands = {
     run: async ({ db }, input) => {
       const outcome = await applyOperation(
         db,
-        { name: 'ideas.capture', ideaId: null, meta: toOperationMeta(input.meta) },
+        {
+          name: 'ideas.capture',
+          ideaId: null,
+          meta: toOperationMeta(input.meta),
+          input: payloadOf(input),
+        },
         async (trx) => {
           const idea = await captureIdea(trx, {
             text: input.text,
@@ -310,7 +321,7 @@ export const commands = {
     mutating: true,
     input: z.object({ meta: metaSchema, itemId: z.string(), author, body: text }),
     run: ({ db }, input) =>
-      itemOp(db, 'items.discuss', input.itemId, input.meta, undefined, (trx) =>
+      itemOp(db, 'items.discuss', input.itemId, input, undefined, (trx) =>
         postContribution(trx, input.itemId, { author: input.author, body: input.body }),
       ),
   }),
@@ -324,8 +335,7 @@ export const commands = {
     mutating: false,
     input: z.object({ ideaId: z.string(), override: overrideSchema.optional() }),
     run: async ({ db }, input) => {
-      const session = await findSessionByIdea(db, input.ideaId);
-      if (session && session.status !== 'handed_off') await assertReadyForHandoff(db, session.id);
+      await assertNoUnansweredPremise(db, input.ideaId); // read-only: this command writes nothing
       const pass = await nextWorkflowPass(db, input.ideaId);
       const prepared = await preparePass(db, input.ideaId, pass, {
         override: input.override ? { ...input.override } : undefined,
@@ -397,7 +407,7 @@ export const commands = {
       inputVersion: inputVersion.optional(),
     }),
     run: ({ db }, input) =>
-      itemOp(db, 'items.decide', input.itemId, input.meta, input.inputVersion, async (trx) => ({
+      itemOp(db, 'items.decide', input.itemId, input, input.inputVersion, async (trx) => ({
         status: await decide(trx, input.itemId, input),
       })),
   }),
@@ -417,7 +427,7 @@ export const commands = {
       inputVersion: inputVersion.optional(),
     }),
     run: ({ db }, input) =>
-      itemOp(db, 'items.split', input.itemId, input.meta, input.inputVersion, async (trx) => ({
+      itemOp(db, 'items.split', input.itemId, input, input.inputVersion, async (trx) => ({
         childIds: (await splitItem(trx, input.itemId, input)).map((c) => c.id),
       })),
   }),
@@ -435,7 +445,7 @@ export const commands = {
       asTangent: z.boolean().optional(),
     }),
     run: ({ db }, input) =>
-      itemOp(db, 'items.branch', input.itemId, input.meta, undefined, async (trx) => ({
+      itemOp(db, 'items.branch', input.itemId, input, undefined, async (trx) => ({
         itemId: (await branchItem(trx, input.itemId, input)).id,
       })),
   }),
@@ -453,7 +463,7 @@ export const commands = {
       rationale: z.string().max(5_000).optional(),
     }),
     run: ({ db }, input) =>
-      itemOp(db, 'items.merge', input.itemIds[0]!, input.meta, undefined, async (trx) => ({
+      itemOp(db, 'items.merge', input.itemIds[0]!, input, undefined, async (trx) => ({
         itemId: (await mergeItems(trx, input)).id,
       })),
   }),
@@ -472,7 +482,7 @@ export const commands = {
       causedByItemId: z.string().optional(),
     }),
     run: ({ db }, input) =>
-      itemOp(db, 'items.supersede', input.itemId, input.meta, undefined, async (trx) => ({
+      itemOp(db, 'items.supersede', input.itemId, input, undefined, async (trx) => ({
         itemId: (await supersedeItem(trx, input.itemId, input)).id,
       })),
   }),
@@ -490,7 +500,7 @@ export const commands = {
       causedByItemId: z.string().optional(),
     }),
     run: ({ db }, input) =>
-      itemOp(db, 'items.revise', input.itemId, input.meta, undefined, async (trx) => ({
+      itemOp(db, 'items.revise', input.itemId, input, undefined, async (trx) => ({
         revision: await reviseItem(trx, input.itemId, input),
       })),
   }),
@@ -510,7 +520,7 @@ export const commands = {
       excerpt: z.string().max(5_000).optional(),
     }),
     run: ({ db }, input) =>
-      itemOp(db, 'items.evidence', input.itemId, input.meta, undefined, async (trx) => ({
+      itemOp(db, 'items.evidence', input.itemId, input, undefined, async (trx) => ({
         itemId: (await attachEvidence(trx, input.itemId, input)).id,
       })),
   }),
@@ -519,14 +529,19 @@ export const commands = {
     description:
       "Promote a tangent to its own idea (the user's decision; needs meta.userInstruction). Without `framing` the new idea keeps the tangent's authorship.",
     mutating: true,
-    input: z.object({
-      meta: metaSchema,
-      itemId: z.string(),
-      framing: z.string().max(50_000).optional(),
-      framingAuthor: author.optional(),
-    }),
+    input: z
+      .object({
+        meta: metaSchema,
+        itemId: z.string(),
+        framing: z.string().max(50_000).optional(),
+        framingAuthor: author.optional(),
+      })
+      .refine((v) => !v.framing?.trim() || v.framingAuthor !== undefined, {
+        message: 'framingAuthor is required with framing: "user" only for their exact words',
+        path: ['framingAuthor'],
+      }),
     run: ({ db }, input) =>
-      itemOp(db, 'items.promote', input.itemId, input.meta, undefined, async (trx) => ({
+      itemOp(db, 'items.promote', input.itemId, input, undefined, async (trx) => ({
         ideaId: (await promoteTangent(trx, input.itemId, input)).id,
       })),
   }),
@@ -542,7 +557,12 @@ export const commands = {
     run: async ({ db }, input) => {
       const outcome = await applyOperation(
         db,
-        { name: 'guided.start', ideaId: null, meta: toOperationMeta(input.meta) },
+        {
+          name: 'guided.start',
+          ideaId: null,
+          meta: toOperationMeta(input.meta),
+          input: payloadOf(input),
+        },
         (trx) => createGuidedSession(trx, { hypothesis: input.hypothesis, author: 'user' }),
       );
       return { ...outcome.result, inputVersion: outcome.inputVersion, replayed: outcome.replayed };
@@ -566,7 +586,12 @@ export const commands = {
       const session = await getGuidedSession(db, input.sessionId);
       const outcome = await applyOperation(
         db,
-        { name: 'guided.answer', ideaId: session.ideaId, meta: toOperationMeta(input.meta) },
+        {
+          name: 'guided.answer',
+          ideaId: session.ideaId,
+          meta: toOperationMeta(input.meta),
+          input: payloadOf(input),
+        },
         async (trx) => ({
           stepId: await recordAnswer(trx, input.sessionId, input.body),
         }),
@@ -647,7 +672,12 @@ export const commands = {
         throw invalid("Pass the user's own words as meta.userInstruction.");
       const outcome = await applyOperation(
         db,
-        { name: 'guided.premise', ideaId: session.ideaId, meta: toOperationMeta(input.meta) },
+        {
+          name: 'guided.premise',
+          ideaId: session.ideaId,
+          meta: toOperationMeta(input.meta),
+          input: payloadOf(input),
+        },
         async (trx) => {
           await recordPremiseResponse(trx, input.sessionId, input);
           return { ok: true };
@@ -686,14 +716,19 @@ async function itemOp<T>(
   db: Db,
   name: string,
   itemId: string,
-  meta: Meta,
+  input: { meta: Meta },
   version: number | undefined,
   fn: (trx: Parameters<Parameters<typeof applyOperation>[2]>[0]) => Promise<T>,
 ) {
   const item = await requireItem(db, itemId);
   const outcome = await applyOperation(
     db,
-    { name, ideaId: item.idea_id, meta: toOperationMeta(meta, version) },
+    {
+      name,
+      ideaId: item.idea_id,
+      meta: toOperationMeta(input.meta, version),
+      input: payloadOf(input),
+    },
     fn,
   );
   return { result: outcome.result, inputVersion: outcome.inputVersion, replayed: outcome.replayed };

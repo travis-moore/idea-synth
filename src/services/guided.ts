@@ -650,11 +650,12 @@ async function reconcilePremise(trx: Trx, session: GuidedSessionsTable): Promise
   const premise = await requireItem(trx, premiseId);
   const stance = HANDLED_ELSEWHERE[premise.status];
   if (!stance) return false;
+  // This sentence is the application's, so it is never stored as the user's words.
   await addStep(trx, session, {
-    author: 'user',
+    author: 'agent',
     step_kind: 'premise_response',
     level: 5,
-    body: `(Handled outside this session: the premise is now ${premise.status}.)`,
+    body: `(System note: the premise was handled outside this session and is now ${premise.status}.)`,
     stance,
     item_id: premiseId,
   });
@@ -708,7 +709,7 @@ export async function recordPremiseResponse(
       author: 'user',
       step_kind: 'premise_response',
       level: 5,
-      body: body.trim() ? body : input.stance,
+      body: body.trim() ? body : '', // never invent words for the user; the stance says it all
       stance: input.stance,
       item_id: itemId,
     });
@@ -723,6 +724,27 @@ export async function respondToPremise(
 ) {
   await recordPremiseResponse(ctx.db, sessionId, input);
   await advanceSession(ctx, sessionId);
+}
+
+/** Read-only: is an agent-supplied premise still waiting for the user? (Writes nothing.) */
+export async function assertNoUnansweredPremise(db: DbOrTrx, ideaId: string): Promise<void> {
+  const session = await findSessionByIdea(db, ideaId);
+  if (!session?.pending_premise_item_id) return;
+  const premise = await requireItem(db, session.pending_premise_item_id);
+  if (!HANDLED_ELSEWHERE[premise.status])
+    throw conflict('Respond to the premise the agent supplied before handing off.');
+}
+
+/**
+ * Commit-time guard for any pass that takes a guided idea into the normal workflow,
+ * whichever client runs it. Reconciles a premise handled elsewhere inside the caller's
+ * transaction (so the write has an operation envelope), or refuses.
+ */
+export async function guardGuidedHandoff(trx: Trx, ideaId: string): Promise<void> {
+  const session = await findSessionByIdea(trx, ideaId);
+  if (!session?.pending_premise_item_id) return;
+  if (!(await reconcilePremise(trx, session)))
+    throw conflict('Respond to the premise the agent supplied before handing off.');
 }
 
 /** Refuse to leave guided mode while an agent-supplied premise is still unanswered. */

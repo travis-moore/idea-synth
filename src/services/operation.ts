@@ -12,6 +12,7 @@
  * approver, and text it wrote stays agent-authored whoever approves it.
  */
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { createHash } from 'node:crypto';
 import type { Transaction } from 'kysely';
 import type { Database, Db } from '../db/schema';
 import { conflict, DomainError, forbidden, invalid } from '../domain/errors';
@@ -80,14 +81,30 @@ export interface OperationOutcome<T> {
   inputVersion: number | null;
 }
 
+/** JSON with sorted keys, so the same request always hashes the same. */
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+  if (value && typeof value === 'object')
+    return `{${Object.entries(value as Record<string, unknown>)
+      .filter(([, v]) => v !== undefined)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([k, v]) => `${JSON.stringify(k)}:${canonical(v)}`)
+      .join(',')}}`;
+  return JSON.stringify(value) ?? 'null';
+}
+
+export const fingerprintOf = (name: string, ideaId: string | null, input: unknown): string =>
+  createHash('sha256').update(canonical({ name, ideaId, input })).digest('hex');
+
 export class StaleInputError extends DomainError {
   constructor(
     public readonly expected: number,
     public readonly actual: number,
+    what = 'The idea',
   ) {
     super(
       'conflict',
-      `The idea changed while this was being prepared (based on version ${expected}, now ${actual}). Nothing was applied. Re-read the context and try again.`,
+      `${what} changed while this was being prepared (based on version ${expected}, now ${actual}). Nothing was applied. Re-read the context and try again.`,
       { reason: 'stale_input', expected, actual },
     );
   }
@@ -115,12 +132,24 @@ async function revisionOf(
  */
 export async function applyOperation<T>(
   db: Db,
-  spec: { name: string; ideaId: string | null; meta: OperationMeta },
+  spec: {
+    name: string;
+    ideaId: string | null;
+    meta: OperationMeta;
+    /**
+     * What is being asked, without `meta`. Required whenever a request id is given: a
+     * reused id is only a retry if this matches what that id was first used for.
+     */
+    input?: unknown;
+  },
   fn: (trx: Transaction<Database>) => Promise<T>,
 ): Promise<OperationOutcome<T>> {
   const { name, meta } = spec;
   if (meta.executedBy === 'agent' && !meta.agentName?.trim())
     throw invalid('An agent must identify itself (agent name) on every operation.');
+  if (meta.requestId && spec.input === undefined)
+    throw invalid('Internal error: an operation with a request id must declare its input.');
+  const fingerprint = meta.requestId ? fingerprintOf(name, spec.ideaId, spec.input) : null;
   const operationId = newId('op');
   const row = (ideaId: string | null) => ({
     id: operationId,
@@ -136,6 +165,7 @@ export async function applyOperation<T>(
     user_instruction: meta.userInstruction ?? null,
     input_version: meta.inputVersion ?? null,
     created_at: new Date().toISOString(),
+    fingerprint,
   });
 
   try {
@@ -147,6 +177,12 @@ export async function applyOperation<T>(
           .where('request_id', '=', meta.requestId)
           .executeTakeFirst();
         if (seen) {
+          if (seen.fingerprint && seen.fingerprint !== fingerprint)
+            throw new DomainError(
+              'conflict',
+              `Request id "${meta.requestId}" was already used for a DIFFERENT request. Nothing was applied. Use a new request id; reuse one only to retry the identical request.`,
+              { reason: 'request_id_reused' },
+            );
           if (seen.name !== name)
             throw conflict(`Request id "${meta.requestId}" was already used for "${seen.name}".`);
           return {

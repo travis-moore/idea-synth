@@ -59,7 +59,10 @@ These are product rules, enforced by the application where possible.
 1. **The user's words are the user's.** `author: "user"` means _verbatim_: no tidying,
    summarising or correcting. Captured ideas, guided answers and user messages are
    permanent provenance.
-2. **Your words are yours**, even when the user asked for them and approves them. A split
+2. **Your words are yours**, even when the user asked for them and approves them. You must
+   always say who wrote a text (`author`, `framingAuthor`); a missing author is refused
+   rather than assumed to be the user. Rewording an existing item as `author: "user"`
+   needs the user's instruction. A split
    whose parts you wrote has `author: "agent"` parts. Accepting your item never makes it
    the user's.
 3. **You never decide for the user.** Accept, qualify, reject, split, merge, supersede,
@@ -76,7 +79,9 @@ These are product rules, enforced by the application where possible.
    against the new state. Your stale output is kept as history but never published.
 6. **Retries reuse the request id.** Every mutating call needs `--request-id` (8+ chars).
    Same request → same id → the stored result is returned (`replayed: true`) and nothing is
-   applied twice. A different request needs a new id.
+   applied twice. A different request needs a new id: reusing an id for different content
+   is refused (`details.reason = "request_id_reused"`) and nothing is stored, so never
+   number ids in a way that can collide (`answer-1`); include something unique.
 7. **Respect the review gate.** After Steps 2–5, stop and work through the `needsUser`
    items _with the user_. Do not proceed to builder/synthesize while the gate is closed
    unless the user explicitly says to, in which case pass

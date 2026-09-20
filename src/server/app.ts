@@ -231,7 +231,11 @@ export function createApp(ctx: AppContext, options: AppOptions) {
       : undefined;
     await assertSynthesisStage(db, ideaId);
     await enforceGate(db, ideaId, override); // fail fast (409 + the blocking ids); re-checked at commit
-    const job = await enqueueJob(ctx, { ideaId, payload: { kind: 'synthesize', override } });
+    const latest = await getSynthesis(db, ideaId);
+    const job = await enqueueJob(ctx, {
+      ideaId,
+      payload: { kind: 'synthesize', override, baseVersion: latest?.version ?? 0 },
+    });
     kick();
     return c.json(job, 202);
   });
@@ -270,11 +274,14 @@ export function createApp(ctx: AppContext, options: AppOptions) {
     const body = await parse(c, bodies.message);
     const ideaId = await ideaOf(itemId);
     // The user's message is committed first; the reply is a separate, durable job.
-    await asUser('items.discuss', ideaId, (trx) =>
+    const posted = await asUser('items.discuss', ideaId, (trx) =>
       postContribution(trx, itemId, { author: 'user', body: body.body }),
     );
     const job = body.askAgent
-      ? await enqueueJob(ctx, { ideaId, payload: { kind: 'discuss_reply', itemId } })
+      ? await enqueueJob(ctx, {
+          ideaId,
+          payload: { kind: 'discuss_reply', itemId, afterSeq: posted.seq },
+        })
       : null;
     if (job) kick();
     return c.json({ detail: await getItemDetail(db, itemId), job }, 201);

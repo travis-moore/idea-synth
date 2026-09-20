@@ -143,15 +143,21 @@ describe('review gate', () => {
     await expect(runSynthesis(ctx, idea.id, await overrideAll(ctx, idea.id))).rejects.toThrow(
       /synthesize pass failed/,
     );
-    const overrides = async () =>
+    const overridden = async () =>
       (
-        await ctx.db.selectFrom('events').select('type').where('idea_id', '=', idea.id).execute()
-      ).filter((e) => e.type === 'gate.overridden').length;
-    expect(await overrides()).toBe(0);
+        await ctx.db
+          .selectFrom('events')
+          .select('payload_json')
+          .where('idea_id', '=', idea.id)
+          .where('type', '=', 'gate.overridden')
+          .execute()
+      ).map((e) => (JSON.parse(e.payload_json) as { pass: string }).pass);
+    // The Builder DID run past the gate, so that is on record; the failed synthesis is not.
+    expect(await overridden()).toEqual(['builder']);
 
     // Retry: the Builder is not run a second time, and the override is now on record.
     await runSynthesis(ctx, idea.id, await overrideAll(ctx, idea.id));
-    expect(await overrides()).toBe(1);
+    expect(await overridden()).toEqual(['builder', 'synthesize']);
     const runs = (await listRuns(ctx.db, idea.id)).filter(
       (r) => r.pass === 'builder' || r.pass === 'synthesize',
     );

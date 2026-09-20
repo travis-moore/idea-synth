@@ -136,6 +136,7 @@ function safeJson(text: string): unknown {
 }
 
 const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
+const MAX_STDERR_BYTES = 64 * 1024;
 
 export class ClaudeCodeCliProvider implements ModelProvider {
   readonly name = 'claude-code-cli';
@@ -217,8 +218,13 @@ export class ClaudeCodeCliProvider implements ModelProvider {
           }),
         );
       }
-      let stdout = '';
-      let stderr = '';
+      // Collected as bytes and decoded ONCE: decoding per chunk corrupts any multibyte
+      // character that happens to straddle a pipe read, and that text would then be
+      // committed into append-only history.
+      const out: Buffer[] = [];
+      const err: Buffer[] = [];
+      let outBytes = 0;
+      let errBytes = 0;
       let settled = false;
       let killTimer: NodeJS.Timeout | null = null;
       const finish = (fn: () => void) => {
@@ -252,8 +258,11 @@ export class ClaudeCodeCliProvider implements ModelProvider {
       signal?.addEventListener('abort', onAbort, { once: true });
 
       child.stdout?.on('data', (chunk) => {
-        stdout += chunk.toString();
-        if (stdout.length > MAX_OUTPUT_BYTES) {
+        if (settled) return;
+        const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        out.push(bytes);
+        outBytes += bytes.length;
+        if (outBytes > MAX_OUTPUT_BYTES) {
           kill();
           finish(() =>
             reject(
@@ -264,7 +273,12 @@ export class ClaudeCodeCliProvider implements ModelProvider {
           );
         }
       });
-      child.stderr?.on('data', (chunk) => (stderr += chunk.toString().slice(0, 20_000)));
+      child.stderr?.on('data', (chunk) => {
+        if (settled || errBytes >= MAX_STDERR_BYTES) return;
+        const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        err.push(bytes.subarray(0, MAX_STDERR_BYTES - errBytes));
+        errBytes += bytes.length;
+      });
       child.stdin?.on('error', () => undefined); // EPIPE if the child exits early; the close handler reports it
       child.on('error', (error) =>
         finish(() =>
@@ -281,7 +295,13 @@ export class ClaudeCodeCliProvider implements ModelProvider {
       child.on('close', (code) => {
         // Only now is the process really gone; until then the SIGKILL escalation stays armed.
         if (killTimer) clearTimeout(killTimer);
-        finish(() => resolve({ code, stdout, stderr }));
+        finish(() =>
+          resolve({
+            code,
+            stdout: Buffer.concat(out).toString('utf8'),
+            stderr: Buffer.concat(err).toString('utf8'),
+          }),
+        );
       });
       child.stdin?.end(stdin);
     });

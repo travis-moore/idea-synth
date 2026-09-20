@@ -323,6 +323,8 @@ export interface RevisionInput {
   reason?: string | null;
   causedByItemId?: string | null;
   runId?: string | null;
+  /** The agent that relayed a user-authored rewording, if any. */
+  relayedBy?: string | null | undefined;
 }
 
 /** Reword an item. The previous wording stays in `item_revisions` for ever. */
@@ -373,6 +375,7 @@ export async function addRevision(db: DbOrTrx, input: RevisionInput): Promise<nu
       previousText: item.text,
       reason: input.reason ?? null,
       causedByItemId: input.causedByItemId ?? null,
+      relayedBy: input.relayedBy ?? null,
     },
   });
   return seq;

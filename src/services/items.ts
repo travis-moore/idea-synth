@@ -23,7 +23,7 @@ import {
 } from '../domain/vocabulary';
 import type { AppContext } from './context';
 import { captureIdea } from './ideas';
-import { requireUserAuthority } from './operation';
+import { currentOperation, requireUserAuthority, StaleInputError } from './operation';
 import { executePass } from './pipeline';
 import { buildSnapshot } from './queries';
 import {
@@ -48,7 +48,18 @@ const USER_DECISIONS: readonly DecisionType[] = [
   'flag_needs_user',
 ];
 
-const originOf = (author: Author | undefined): Origin => (author === 'agent' ? 'agent' : 'user');
+/**
+ * Who wrote a piece of text. The web user acting directly may leave it out (it is theirs).
+ * An agent may not: a missing author must never quietly become "the user said this".
+ */
+function resolveAuthor(author: Author | undefined, what: string): Author {
+  if (author) return author;
+  if (currentOperation()?.meta.executedBy === 'agent')
+    throw invalid(`Say who wrote ${what}: author "user" (their exact words) or "agent" (yours).`);
+  return 'user';
+}
+
+const originOf = (author: Author): Origin => (author === 'agent' ? 'agent' : 'user');
 
 function creatableKind(kind: ItemKind | undefined, fallback: ItemKind): ItemKind {
   const chosen = kind ?? (USER_CREATABLE_KINDS.includes(fallback) ? fallback : 'hypothesis');
@@ -97,12 +108,13 @@ export async function splitItem(
     const idea = await requireIdea(trx, parent.idea_id);
     const children: ReasoningItemsTable[] = [];
     for (const child of input.children) {
+      const childAuthor = resolveAuthor(child.author, 'each part');
       const row = await createItem(trx, {
         idea,
         kind: creatableKind(child.kind, parent.kind),
-        origin: originOf(child.author),
+        origin: originOf(childAuthor),
         text: child.text,
-        verbatim: child.author !== 'agent', // the user's words are kept exactly
+        verbatim: childAuthor === 'user', // the user's words are kept exactly
         via: 'split',
       });
       await createRelation(trx, {
@@ -149,7 +161,7 @@ export async function branchItem(
     author?: Author | undefined;
   },
 ): Promise<ReasoningItemsTable> {
-  const author: Author = input.author ?? 'user';
+  const author = resolveAuthor(input.author, 'the new item');
   return inTransaction(db, async (trx) => {
     const parent = await requireItem(trx, itemId);
     const idea = await requireIdea(trx, parent.idea_id);
@@ -214,12 +226,13 @@ export async function mergeItems(
     if (sources.some((s) => s.idea_id !== first.idea_id))
       throw invalid('Only items of the same idea can be merged.');
     const idea = await requireIdea(trx, first.idea_id);
+    const textAuthor = resolveAuthor(input.author, 'the merged text');
     const merged = await createItem(trx, {
       idea,
       kind: creatableKind(input.kind, first.kind),
-      origin: originOf(input.author),
+      origin: originOf(textAuthor),
       text: input.text,
-      verbatim: input.author !== 'agent',
+      verbatim: textAuthor === 'user',
       via: 'merge',
     });
     for (const source of sources) {
@@ -243,7 +256,7 @@ export async function mergeItems(
       itemId: merged.id,
       type: 'item.merged',
       actor: 'user',
-      payload: { sourceIds: ids, textAuthor: input.author ?? 'user' },
+      payload: { sourceIds: ids, textAuthor },
     });
     return merged;
   });
@@ -268,12 +281,13 @@ export async function supersedeItem(
       const cause = await requireItem(trx, input.causedByItemId);
       if (cause.idea_id !== idea.id) throw invalid('The cause must belong to the same idea.');
     }
+    const textAuthor = resolveAuthor(input.author, 'the new formulation');
     const replacement = await createItem(trx, {
       idea,
       kind: creatableKind(input.kind, old.kind),
-      origin: originOf(input.author),
+      origin: originOf(textAuthor),
       text: input.text,
-      verbatim: input.author !== 'agent',
+      verbatim: textAuthor === 'user',
       via: 'supersede',
     });
     await createRelation(trx, {
@@ -299,7 +313,7 @@ export async function supersedeItem(
       payload: {
         replacementId: replacement.id,
         causedByItemId: input.causedByItemId ?? null,
-        textAuthor: input.author ?? 'user',
+        textAuthor,
       },
     });
     return replacement;
@@ -322,16 +336,21 @@ export function reviseItem(
     author?: Author | undefined;
   },
 ) {
-  const author: Author = input.author ?? 'user';
+  const author = resolveAuthor(input.author, 'the new wording');
   return inTransaction(db, async (trx) => {
+    let relayedBy: string | null = null;
     if (author === 'agent') {
       const item = await requireItem(trx, itemId);
       if (item.origin !== 'agent')
         throw forbidden(
           "An agent may not reword the user's thought. Propose a branch or a superseding item for the user to decide on.",
         );
+    } else {
+      // Rewording changes what an existing item currently SAYS. When an agent relays it,
+      // "author: user" alone is not enough: the user's instruction is required and kept.
+      relayedBy = requireUserAuthority('reword an item').relayedBy;
     }
-    return addRevision(trx, { itemId, ...input, author });
+    return addRevision(trx, { itemId, ...input, author, relayedBy });
   });
 }
 
@@ -349,7 +368,7 @@ export async function attachEvidence(
   },
 ): Promise<ReasoningItemsTable> {
   if (!input.sourceTitle.trim()) throw invalid('Evidence needs a source.');
-  const author: Author = input.author ?? 'user';
+  const author = resolveAuthor(input.author, 'the evidence');
   return inTransaction(db, async (trx) => {
     const target = await requireItem(trx, itemId);
     const idea = await requireIdea(trx, target.idea_id);
@@ -414,21 +433,36 @@ export async function requestAgentReply(
   const snapshot = await buildSnapshot(ctx.db, item.idea_id);
   const thread = await ctx.db
     .selectFrom('discussion_messages')
-    .select(['author', 'body'])
+    .select(['author', 'body', 'seq'])
     .where('item_id', '=', itemId)
     .orderBy('seq')
     .execute();
   const target = snapshot.items.find((i) => i.id === itemId)!;
+  const readSeq = thread.at(-1)?.seq ?? 0;
   await executePass(
     ctx,
     item.idea_id,
-    discussRequest({ snapshot, item: target, thread }),
+    discussRequest({
+      snapshot,
+      item: target,
+      thread: thread.map(({ author, body }) => ({ author, body })),
+    }),
     async (trx, out: DiscussOutput, runId) => {
+      // A reply must directly follow the thread it was written for. If the user said
+      // something more while the model was writing, this reply never saw it: refuse it
+      // (it is kept as a stale run) so that a fresh one can answer the whole thread.
+      const latest = await trx
+        .selectFrom('discussion_messages')
+        .select((eb) => eb.fn.max('seq').as('seq'))
+        .where('item_id', '=', itemId)
+        .executeTakeFirst();
+      if ((latest?.seq ?? 0) !== readSeq)
+        throw new StaleInputError(readSeq, latest?.seq ?? 0, 'The discussion thread');
       const body = out.suggestion ? `${out.reply}\n\nSuggestion: ${out.suggestion}` : out.reply;
       await postMessage(trx, { itemId, author: 'agent', body, runId });
     },
-    // A reply is added to a thread; it does not compute new state from the idea, so a
-    // newer message or decision does not invalidate it. The version it saw is recorded.
+    // A reply is bound to its THREAD (checked above), not to the whole idea: an unrelated
+    // decision elsewhere does not invalidate it. The idea version it saw is still recorded.
     { readVersion: snapshot.inputVersion, checkVersion: false, signal: options.signal },
   );
 }
@@ -468,11 +502,13 @@ export async function promoteTangent(
       .executeTakeFirst();
     if (already) throw conflict('This tangent has already been promoted to its own idea.');
 
-    const framing = input.framing?.trim() ? input.framing.trim() : undefined;
+    // A reframing is stored exactly as written, and must say whose words it is.
+    const framing = input.framing?.trim() ? input.framing : undefined;
+    const framingAuthor = framing ? resolveAuthor(input.framingAuthor, 'the reframing') : null;
     const idea = await captureIdea(trx, {
       text: framing ?? item.text,
       source: 'promoted_tangent',
-      rootOrigin: framing ? originOf(input.framingAuthor) : item.origin,
+      rootOrigin: framingAuthor ? originOf(framingAuthor) : item.origin,
       sourceItemId: item.id,
       sourceIdeaId: item.idea_id,
     });
@@ -490,7 +526,7 @@ export async function promoteTangent(
       payload: {
         sourceIdeaId: item.idea_id,
         sourceItemId: item.id,
-        framingAuthor: framing ? (input.framingAuthor ?? 'user') : null,
+        framingAuthor,
       },
     });
     return idea;

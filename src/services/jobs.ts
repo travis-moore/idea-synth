@@ -24,6 +24,7 @@ import type { GateOverride } from './apply';
 import type { AppContext } from './context';
 import { advanceSession, handOffToSynthesis } from './guided';
 import { requestAgentReply } from './items';
+import { StaleInputError } from './operation';
 import { runAnalysis, runSynthesis, type PassOptions } from './pipeline';
 import { nowIso, requireIdea } from './store';
 
@@ -31,8 +32,18 @@ type JobRow = Selectable<JobsTable>;
 
 export type JobPayload =
   | { kind: 'analyze' }
-  | { kind: 'synthesize'; override?: GateOverride | undefined }
-  | { kind: 'discuss_reply'; itemId: string }
+  | {
+      kind: 'synthesize';
+      override?: GateOverride | undefined;
+      /** Latest synthesis version when this was requested: makes a resumed job a no-op. */
+      baseVersion: number;
+    }
+  | {
+      kind: 'discuss_reply';
+      itemId: string;
+      /** The user message this reply was asked for. A newer message gets its own job. */
+      afterSeq: number;
+    }
   | { kind: 'guided_turn'; sessionId: string }
   | { kind: 'guided_handoff'; sessionId: string };
 
@@ -88,7 +99,12 @@ export async function enqueueJob(
         .selectAll()
         .where('request_id', '=', input.requestId)
         .executeTakeFirst();
-      if (seen) return seen;
+      if (seen) {
+        // A reused id is only a retry if it asks for the same work.
+        if (seen.idea_id !== input.ideaId || seen.payload_json !== JSON.stringify(input.payload))
+          throw conflict(`Request id "${input.requestId}" was already used for a different job.`);
+        return seen;
+      }
     }
     const payloadJson = JSON.stringify(input.payload);
     const same = await trx
@@ -295,7 +311,9 @@ export class JobRunner {
         const job = await this.claim();
         if (!job) break;
         const controller = new AbortController();
-        const done = this.run(job, controller).finally(() => this.active.delete(job.id));
+        const done = this.run(job, controller)
+          .catch((error: unknown) => console.error(`job ${job.id} bookkeeping failed:`, error))
+          .finally(() => this.active.delete(job.id));
         this.active.set(job.id, { controller, done });
       }
     } catch (error) {
@@ -412,17 +430,50 @@ export class JobRunner {
         if (idea.stage === 'in_review' || idea.stage === 'synthesized') return; // already done (resumed job)
         return runAnalysis(ctx, job.idea_id, options);
       }
-      case 'synthesize':
-        return runSynthesis(ctx, job.idea_id, { ...options, override: payload.override });
-      case 'discuss_reply': {
-        const last = await ctx.db
-          .selectFrom('discussion_messages')
-          .select('author')
-          .where('item_id', '=', payload.itemId)
-          .orderBy('seq', 'desc')
+      case 'synthesize': {
+        // Resumed after the synthesis had already landed (crash between commit and the
+        // status write)? Then there is nothing left to do; never build a second one.
+        const latest = await ctx.db
+          .selectFrom('syntheses')
+          .select((eb) => eb.fn.max('version').as('version'))
+          .where('idea_id', '=', job.idea_id)
           .executeTakeFirst();
-        if (last?.author === 'agent') return; // the reply already landed (resumed job)
-        return requestAgentReply(ctx, payload.itemId, options);
+        if ((latest?.version ?? 0) > payload.baseVersion) return;
+        return runSynthesis(ctx, job.idea_id, { ...options, override: payload.override });
+      }
+      case 'discuss_reply': {
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const last = await ctx.db
+            .selectFrom('discussion_messages')
+            .select(['author', 'seq'])
+            .where('item_id', '=', payload.itemId)
+            .orderBy('seq', 'desc')
+            .executeTakeFirst();
+          if (last?.author === 'agent') return; // the thread already ends with a reply
+          const newer = await ctx.db
+            .selectFrom('jobs')
+            .select(['id', 'payload_json'])
+            .where('kind', '=', 'discuss_reply')
+            .where('status', '=', 'queued')
+            .where('id', '>', job.id)
+            .execute();
+          // A later request for the same thread will answer all of it.
+          if (
+            newer.some(
+              (j) => (JSON.parse(j.payload_json) as { itemId?: string }).itemId === payload.itemId,
+            )
+          )
+            return;
+          try {
+            return await requestAgentReply(ctx, payload.itemId, options);
+          } catch (error) {
+            // The user added to the thread while the reply was being written: write a new one.
+            if (!(error instanceof StaleInputError)) throw error;
+          }
+        }
+        throw conflict(
+          'The discussion kept changing while a reply was being written. Ask again when ready.',
+        );
       }
       case 'guided_turn':
         return advanceSession(ctx, payload.sessionId, options);

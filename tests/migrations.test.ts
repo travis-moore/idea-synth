@@ -42,7 +42,10 @@ describe('migrations', () => {
     await old.destroy();
 
     const db = openDb(file);
-    expect(await migrateToLatest(db)).toEqual(['0002_clients_versions_jobs']);
+    expect(await migrateToLatest(db)).toEqual([
+      '0002_clients_versions_jobs',
+      '0003_request_fingerprints',
+    ]);
     const idea = await db
       .selectFrom('ideas')
       .selectAll()

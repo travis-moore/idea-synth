@@ -148,7 +148,10 @@ describe('durable jobs', () => {
         })
       ).id,
     ).toBe(job.id);
-    const second = await enqueueJob(ctx, { ideaId: a.id, payload: { kind: 'synthesize' } });
+    const second = await enqueueJob(ctx, {
+      ideaId: a.id,
+      payload: { kind: 'synthesize', baseVersion: 0 },
+    });
     runner.start();
     await until(async () => (await getJob(ctx.db, job.id)).status === 'running');
     await new Promise((r) => setTimeout(r, 30));

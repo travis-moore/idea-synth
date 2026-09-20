@@ -249,6 +249,8 @@ export interface OperationsTable {
   input_version: number | null;
   result_json: string | null;
   created_at: string;
+  /** sha256 of what was asked. Null on rows written before migration 0003. */
+  fingerprint: string | null;
 }
 
 export type JobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted';

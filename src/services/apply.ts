@@ -282,6 +282,30 @@ export async function enforceGate(
   return gate.blockingItemIds;
 }
 
+/** Put a gate override on the record, in the transaction of the pass it let through. */
+export async function recordGateOverride(
+  trx: Trx,
+  ideaId: string,
+  runId: string,
+  pass: 'builder' | 'synthesize',
+  overridden: string[],
+  override: GateOverride | undefined,
+): Promise<void> {
+  if (overridden.length === 0) return;
+  await logEvent(trx, {
+    ideaId,
+    type: 'gate.overridden',
+    actor: 'user',
+    runId,
+    payload: {
+      pass,
+      blockingItemIds: overridden,
+      relayedBy: override?.relayedBy ?? null,
+      userInstruction: override?.userInstruction ?? null,
+    },
+  });
+}
+
 export interface SynthesisApplied {
   synthesisItemId: string;
   version: number;
@@ -298,20 +322,9 @@ export async function applySynthesis(
 ): Promise<SynthesisApplied> {
   // The gate is decided here, in the transaction that commits the synthesis, so nothing
   // that started needing the user while the model was thinking can be skipped silently,
-  // and an override is only ever recorded for a synthesis that actually happened.
+  // and an override is only ever recorded together with the pass it actually let through.
   const overridden = await enforceGate(trx, idea.id, override);
-  if (overridden.length > 0)
-    await logEvent(trx, {
-      ideaId: idea.id,
-      type: 'gate.overridden',
-      actor: 'user',
-      runId,
-      payload: {
-        blockingItemIds: overridden,
-        relayedBy: override?.relayedBy ?? null,
-        userInstruction: override?.userInstruction ?? null,
-      },
-    });
+  await recordGateOverride(trx, idea.id, runId, 'synthesize', overridden, override);
 
   const existing = await existingItemIds(trx, idea.id);
   const lines = [

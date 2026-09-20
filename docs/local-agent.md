@@ -123,8 +123,10 @@ history.
 
 ## Local-only service
 
-The server binds to `127.0.0.1` (change `HOST` only if you understand that there are no
-user accounts). Every request must carry a loopback `Host`; requests naming a foreign
+The server binds to `127.0.0.1` and **refuses to start on any other `HOST`** unless
+`IDEA_SYNTH_ALLOW_REMOTE=1` is set, because there are no user accounts. Headers can be
+forged by non-browser clients, so the token endpoint and every state change additionally
+require the TCP connection itself to come from loopback. Every request must carry a loopback `Host`; requests naming a foreign
 `Origin` or `Sec-Fetch-Site` are refused; every state-changing or job-launching request
 needs the per-installation token (`data/.api-token`, mode 600, served only to a same-origin
 page via `GET /api/session`). No CORS headers are ever sent. There is no endpoint that

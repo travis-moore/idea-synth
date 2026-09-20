@@ -20,6 +20,15 @@ if (process.env.IDEA_SYNTH_SEED !== 'off' && (await isEmpty(db))) {
   console.log('Seeded the demo idea (set IDEA_SYNTH_SEED=off to skip).');
 }
 
+const loopback = ['127.0.0.1', 'localhost', '::1'].includes(host());
+if (!loopback && process.env.IDEA_SYNTH_ALLOW_REMOTE !== '1') {
+  console.error(
+    `Refusing to listen on HOST=${host()}: Idea Synth has no user accounts, and anyone who can reach it could read and change your ideas and start agent jobs on your subscription. ` +
+      'Use the default loopback address, or set IDEA_SYNTH_ALLOW_REMOTE=1 if you really mean it.',
+  );
+  process.exit(1);
+}
+
 const provider = createProvider();
 const ctx = { db, provider };
 const runner = new JobRunner(ctx, {
@@ -33,7 +42,10 @@ const tokenFile =
   dbPath() === ':memory:'
     ? join(REPO_ROOT, 'data', '.api-token')
     : join(dirname(dbPath()), '.api-token');
-const security = localSecurity(loadOrCreateToken(tokenFile), port());
+const security = {
+  ...localSecurity(loadOrCreateToken(tokenFile), port()),
+  allowRemotePeers: !loopback,
+};
 const app = createApp(ctx, {
   staticDir: relative(process.cwd(), join(REPO_ROOT, 'web/dist')) || '.',
   security,
@@ -42,10 +54,7 @@ const app = createApp(ctx, {
 
 const server = serve({ fetch: app.fetch, port: port(), hostname: host() }, (info) => {
   console.log(`Idea Synth on http://${host()}:${info.port}  -  ${provider.status()}`);
-  if (host() !== '127.0.0.1' && host() !== 'localhost' && host() !== '::1')
-    console.warn(
-      'WARNING: HOST is not loopback. This service has no user accounts; do not expose it.',
-    );
+  if (!loopback) console.warn('WARNING: listening beyond loopback with no user accounts.');
 });
 
 const shutdown = async () => {

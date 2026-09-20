@@ -385,10 +385,17 @@ describe('7. synthesis points back to its sources', () => {
     // Forcing past the gate is itself on the record.
     const events = await ctx.db
       .selectFrom('events')
-      .select('type')
+      .select(['type', 'payload_json'])
       .where('idea_id', '=', idea.id)
+      .where('type', '=', 'gate.overridden')
       .execute();
-    expect(events.filter((e) => e.type === 'gate.overridden')).toHaveLength(2);
+    // Once per pass that ran past the gate: Builder and Synthesis, for each of the two runs.
+    expect(events.map((e) => (JSON.parse(e.payload_json) as { pass: string }).pass)).toEqual([
+      'builder',
+      'synthesize',
+      'builder',
+      'synthesize',
+    ]);
   });
 });
 

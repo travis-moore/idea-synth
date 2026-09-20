@@ -188,6 +188,14 @@ the same transaction.
 - `ideas.revision` is the **input version**. `logEvent` bumps it for every state-changing
   event, in the same transaction. `applyOperation` / `commitPass` compare it atomically
   (all transactions are `BEGIN IMMEDIATE`, so this holds across processes).
+- A request id identifies a _request_: `operations.fingerprint` hashes what was asked, and a
+  reused id with different content is refused, never answered with a stored result. Every
+  `applyOperation` call that takes a request id must declare its `input`.
+- A discussion reply is bound to the thread it read (max `seq`), a synthesize job to the
+  synthesis version it was requested at: resumed or late work re-checks and becomes a no-op
+  or a `stale` run. A gate override is recorded on every pass it lets through (Builder too).
+- Application-written text is never stored with `author: 'user'`, and read-only commands
+  write nothing.
 - `jobs` is **mutable operational state**, not history. Never treat it as provenance and
   never put reasoning content only there.
 - `reasoning_items`: only `status`, `text`, `epistemic_verdict`, `attention_reason`,
