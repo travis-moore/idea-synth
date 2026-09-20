@@ -43,7 +43,13 @@ export interface ItemSnapshot {
 }
 
 export interface IdeaSnapshot {
-  idea: { id: string; title: string; originalText: string };
+  idea: {
+    id: string;
+    title: string;
+    originalText: string;
+    /** Who wrote the original text. `user` unless the idea is an un-reframed promoted tangent. */
+    originalTextOrigin: Origin;
+  };
   items: ItemSnapshot[];
   relations: Array<{ fromItemId: string; toItemId: string; type: RelationType }>;
 }
@@ -120,7 +126,9 @@ function renderItems(items: ItemSnapshot[]): string {
 
 function renderSnapshot(s: IdeaSnapshot): string {
   return [
-    `ORIGINAL TEXT (the user's own words, never to be rewritten):\n"""${s.idea.originalText}"""`,
+    s.idea.originalTextOrigin === 'user'
+      ? `ORIGINAL TEXT (the user's own words, never to be rewritten):\n"""${s.idea.originalText}"""`
+      : `ORIGINAL TEXT (NOT the user's words: this idea was promoted from a tangent written by the agent. Do not attribute it to the user):\n"""${s.idea.originalText}"""`,
     `ITEMS:\n${renderItems(s.items)}`,
     `RELATIONS:\n${s.relations.map((r) => `- ${r.fromItemId} --${r.type}--> ${r.toItemId}`).join('\n') || '(none)'}`,
   ].join('\n\n');

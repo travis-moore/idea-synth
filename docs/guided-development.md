@@ -60,6 +60,11 @@ Turns that carry reasoning content also become items in the idea's graph:
 | A level-5 supplied premise                         | `needs_user` until answered, `answers` → question                       | `agent` — **for ever** |
 | User modifies the premise                          | new item that `supersedes` the agent's                                  | `user`                 |
 
+A supplied premise is an ordinary item, so it can also be handled from the inbox or item
+panel. The session then records what happened (`premise_response`, "handled outside this
+session") and moves on rather than deadlocking. A hand-off is only marked complete once the
+analysis has landed, so a failed hand-off can simply be retried.
+
 Accepting an agent-supplied premise records an `accept` decision by the user. It never
 changes the premise's origin: the history always shows the AI supplied it and the user
 agreed.

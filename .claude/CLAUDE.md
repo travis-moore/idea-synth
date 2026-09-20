@@ -184,8 +184,11 @@ append-only triggers. Triggers are SQLite syntax; the PostgreSQL path is describ
   only file that does.
 - A pass = prompt + structured `input` + a zod output schema (`src/ai/schemas.ts`).
   `executePass` (in `pipeline.ts`) calls the provider, validates the output, and applies it
-  in one transaction with its `analysis_runs` row. Invalid output, unknown references or
-  kinds outside the pass's remit fail the whole pass and leave only a `failed` run.
+  in one transaction with its `analysis_runs` row. Invalid output, unknown references, or
+  kinds / edge types outside the pass's remit (`ALLOWED_KINDS`, `ALLOWED_LINKS`) fail the
+  whole pass and leave only a `failed` run. Models never write structural genealogy edges.
+- `extracted_from_user` is only granted when the captured text is the user's and a quote
+  is actually found in it (`src/domain/quotes.ts`); otherwise the item is the agent's.
 - Passes/roles: `extract`, `explore` (Explorer), `epistemic` + `adversarial` (Skeptic),
   `builder` + `synthesize` (Builder), `discuss`, `tutor`.
 - The **scaffolding level is chosen by code** (`nextScaffoldLevel`), not by the model.

@@ -23,16 +23,17 @@ import type {
   SynthesizeOutput,
 } from '../ai/schemas';
 import type { SynthesisBodyDto } from '../api-types';
-import type { Database, IdeasTable } from '../db/schema';
+import type { Database, DbOrTrx, IdeasTable } from '../db/schema';
 import { conflict, DomainError, invalid, upstream } from '../domain/errors';
 import { newId } from '../domain/ids';
+import { locateQuote } from '../domain/quotes';
 import { evaluateReviewGate } from '../domain/rules';
 import {
   ANALYSIS_PASS_ORDER,
   EXTRACTABLE_KINDS,
   type ItemKind,
-  type Origin,
   type Pass,
+  type RelationType,
 } from '../domain/vocabulary';
 import type { AppContext } from './context';
 import { setStage } from './ideas';
@@ -69,6 +70,31 @@ const ALLOWED_KINDS: Record<
     'inference',
   ],
 };
+
+type ItemPass = keyof typeof ALLOWED_KINDS;
+
+/**
+ * Edge types a model may write. Structural genealogy (`supersedes`, `merged_into`,
+ * `branches_to`, `synthesized_into`, `answers`) and evidence edges are only ever written
+ * by the application as part of the operation they record, never on a model's say-so.
+ */
+const COMMON_LINKS: readonly RelationType[] = [
+  'derived_from',
+  'supports',
+  'contradicts',
+  'qualifies',
+  'questions',
+  'assumes',
+];
+const ALLOWED_LINKS: Record<ItemPass, readonly RelationType[]> = {
+  extract: COMMON_LINKS,
+  explore: [...COMMON_LINKS, 'tangent_of'],
+  epistemic: [...COMMON_LINKS, 'corrects'],
+  adversarial: COMMON_LINKS,
+  builder: COMMON_LINKS,
+};
+/** Only `assumes` may point *at* the new item (an existing claim assumes a new assumption). */
+const INBOUND_LINKS: readonly RelationType[] = ['assumes'];
 
 // One pipeline run per idea at a time. Single-process by design (see ADR 0001).
 const running = new Set<string>();
@@ -160,7 +186,9 @@ export async function executePass<T, R>(
       });
     });
     if (error instanceof DomainError && error.code !== 'invalid') throw error;
-    throw upstream(`The ${request.pass} pass failed and nothing was changed. ${message}`);
+    throw upstream(
+      `The ${request.pass} pass failed and its changes were rolled back (earlier passes are kept). ${message}`,
+    );
   }
 }
 
@@ -187,11 +215,17 @@ async function applyNewItems(
   trx: Trx,
   idea: IdeasTable,
   runId: string,
-  pass: keyof typeof ALLOWED_KINDS,
+  pass: ItemPass,
   items: Array<NewItemOutput & { source_quotes?: string[] }>,
-  origin: Origin,
 ): Promise<Map<string, string>> {
   const existing = await existingItemIds(trx, idea.id);
+  const root = await trx
+    .selectFrom('reasoning_items')
+    .select(['id', 'origin'])
+    .where('idea_id', '=', idea.id)
+    .where('kind', '=', 'original_idea')
+    .executeTakeFirstOrThrow();
+
   const keyToId = new Map<string, string>();
   for (const item of items) {
     if (!ALLOWED_KINDS[pass].includes(item.kind))
@@ -199,13 +233,30 @@ async function applyNewItems(
     if (keyToId.has(item.key)) throw invalid(`Duplicate item key "${item.key}" in model output.`);
     if (pass !== 'extract' && item.links.length === 0)
       throw invalid(`Item "${item.key}" is not linked to anything it arose from.`);
+    for (const link of item.links) {
+      if (!ALLOWED_LINKS[pass].includes(link.type))
+        throw invalid(`The ${pass} pass may not create "${link.type}" edges.`);
+      if (link.direction === 'in' && !INBOUND_LINKS.includes(link.type))
+        throw invalid(`A "${link.type}" edge cannot point at a newly created item.`);
+    }
+
+    // `extracted_from_user` is a permanent claim that the user said this. It is only
+    // made when the captured text really is the user's AND a quote is found in it.
+    // Otherwise the item is the agent's, and an unfounded extraction is put to the user.
+    const located = (item.source_quotes ?? []).some((q) => locateQuote(idea.original_text, q));
+    const fromUser = pass === 'extract' && root.origin === 'user' && located;
+    const unfounded = pass === 'extract' && root.origin === 'user' && !located;
+    // Builder output is a proposal made after the gate; it must not re-close the gate
+    // behind the user's back, so it is never `needs_user`.
+    const needsUser = unfounded || (item.needs_user && !item.is_tangent && pass !== 'builder');
+
     const row = await createItem(trx, {
       idea,
       kind: item.kind,
-      origin,
+      origin: fromUser ? 'extracted_from_user' : 'agent',
       text: item.text,
-      status: item.needs_user && !item.is_tangent ? 'needs_user' : 'open',
-      attentionReason: item.attention_reason ?? null,
+      status: needsUser ? 'needs_user' : 'open',
+      attentionReason: unfounded ? 'clarification_needed' : (item.attention_reason ?? null),
       runId,
       runKey: item.key,
       sourceQuotes: item.source_quotes ?? [],
@@ -215,13 +266,6 @@ async function applyNewItems(
   }
 
   const resolve = resolver(existing, keyToId);
-  const root = await trx
-    .selectFrom('reasoning_items')
-    .select('id')
-    .where('idea_id', '=', idea.id)
-    .where('kind', '=', 'original_idea')
-    .executeTakeFirstOrThrow();
-
   for (const item of items) {
     const itemId = keyToId.get(item.key)!;
     for (const link of item.links) {
@@ -298,7 +342,7 @@ async function applyEpistemic(trx: Trx, idea: IdeasTable, runId: string, out: Ep
       runId,
     });
   }
-  const keyToId = await applyNewItems(trx, idea, runId, 'epistemic', out.corrections, 'agent');
+  const keyToId = await applyNewItems(trx, idea, runId, 'epistemic', out.corrections);
   const resolve = resolver(existing, keyToId);
   for (const e of out.evidence) {
     const about = resolve(e.about);
@@ -372,7 +416,7 @@ export async function runAnalysis(ctx: AppContext, ideaId: string): Promise<void
             ideaId,
             analysisRequests.extract(snapshot),
             (trx, out: ExtractOutput, runId) =>
-              applyNewItems(trx, idea, runId, 'extract', out.items, 'extracted_from_user'),
+              applyNewItems(trx, idea, runId, 'extract', out.items),
           );
           break;
         case 'explore':
@@ -381,7 +425,7 @@ export async function runAnalysis(ctx: AppContext, ideaId: string): Promise<void
             ideaId,
             analysisRequests.explore(snapshot),
             (trx, out: ExploreOutput, runId) =>
-              applyNewItems(trx, idea, runId, 'explore', out.items, 'agent'),
+              applyNewItems(trx, idea, runId, 'explore', out.items),
           );
           break;
         case 'epistemic':
@@ -398,7 +442,7 @@ export async function runAnalysis(ctx: AppContext, ideaId: string): Promise<void
             ideaId,
             analysisRequests.adversarial(snapshot),
             async (trx, out: AdversarialOutput, runId) => {
-              await applyNewItems(trx, idea, runId, 'adversarial', out.items, 'agent');
+              await applyNewItems(trx, idea, runId, 'adversarial', out.items);
               await applyFlags(trx, idea.id, runId, out.flags);
             },
           );
@@ -409,12 +453,40 @@ export async function runAnalysis(ctx: AppContext, ideaId: string): Promise<void
   });
 }
 
+const GATE_BLOCKED = (n: number) =>
+  `${n} item(s) still need your input. Review them first, or proceed anyway.`;
+
+async function currentGate(db: DbOrTrx, ideaId: string) {
+  const items = await db
+    .selectFrom('reasoning_items')
+    .select(['id', 'status', 'kind'])
+    .where('idea_id', '=', ideaId)
+    .execute();
+  return evaluateReviewGate(items);
+}
+
 async function applySynthesis(
   trx: Trx,
   idea: IdeasTable,
   runId: string,
   out: SynthesizeOutput,
+  force: boolean,
 ): Promise<void> {
+  // The gate is decided here, in the transaction that commits the synthesis, so nothing
+  // that started needing the user while the model was thinking can be skipped silently,
+  // and an override is only ever recorded for a synthesis that actually happened.
+  const gate = await currentGate(trx, idea.id);
+  if (!gate.canProceed) {
+    if (!force) throw conflict(GATE_BLOCKED(gate.blockingItemIds.length));
+    await logEvent(trx, {
+      ideaId: idea.id,
+      type: 'gate.overridden',
+      actor: 'user',
+      runId,
+      payload: { blockingItemIds: gate.blockingItemIds },
+    });
+  }
+
   const existing = await existingItemIds(trx, idea.id);
   const lines = [
     out.initial_thought,
@@ -455,7 +527,14 @@ async function applySynthesis(
       .where('reasoning_items.kind', '=', 'conclusion')
       .where('reasoning_items.status', '=', 'open')
       .execute();
-    for (const id of [previous.item_id, ...stale.map((s) => s.id)])
+    const previousItem = await trx
+      .selectFrom('reasoning_items')
+      .select('status')
+      .where('id', '=', previous.item_id)
+      .executeTakeFirstOrThrow();
+    // Defensive: never let an already-retired record wedge the next version.
+    const toRetire = previousItem.status === 'superseded' ? [] : [previous.item_id];
+    for (const id of [...toRetire, ...stale.map((s) => s.id)])
       await recordDecision(trx, {
         itemId: id,
         type: 'supersede',
@@ -586,37 +665,39 @@ export async function runSynthesis(
     const idea = await requireIdea(ctx.db, ideaId);
     if (idea.stage !== 'in_review' && idea.stage !== 'synthesized')
       throw conflict('Run the analysis (Steps 2-5) before building a synthesis.');
-    const items = await ctx.db
-      .selectFrom('reasoning_items')
-      .select(['id', 'status', 'kind'])
-      .where('idea_id', '=', ideaId)
-      .execute();
-    const gate = evaluateReviewGate(items);
-    if (!gate.canProceed) {
-      if (!options.force)
-        throw conflict(
-          `${gate.blockingItemIds.length} item(s) still need your input. Review them first, or proceed anyway.`,
-        );
-      await logEvent(ctx.db, {
-        ideaId,
-        type: 'gate.overridden',
-        actor: 'user',
-        payload: { blockingItemIds: gate.blockingItemIds },
-      });
-    }
+    const force = Boolean(options.force);
+    // Early check so a blocked gate costs no model calls. The binding check is in applySynthesis.
+    const gate = await currentGate(ctx.db, ideaId);
+    if (!gate.canProceed && !force) throw conflict(GATE_BLOCKED(gate.blockingItemIds.length));
 
-    await executePass(
-      ctx,
-      ideaId,
-      analysisRequests.builder(await buildSnapshot(ctx.db, ideaId)),
-      (trx, out: BuilderOutput, runId) =>
-        applyNewItems(trx, idea, runId, 'builder', out.items, 'agent'),
-    );
+    // Resumable: if the Builder already ran since the last synthesis (i.e. an earlier
+    // attempt failed at the synthesis step), do not run it again and pile up duplicates.
+    const lastRun = async (pass: Pass) =>
+      (
+        await ctx.db
+          .selectFrom('analysis_runs')
+          .select((eb) => eb.fn.max('id').as('id'))
+          .where('idea_id', '=', ideaId)
+          .where('pass', '=', pass)
+          .where('status', '=', 'completed')
+          .executeTakeFirst()
+      )?.id ?? '';
+    const [lastBuilder, lastSynthesis] = await Promise.all([
+      lastRun('builder'),
+      lastRun('synthesize'),
+    ]);
+    if (lastBuilder <= lastSynthesis)
+      await executePass(
+        ctx,
+        ideaId,
+        analysisRequests.builder(await buildSnapshot(ctx.db, ideaId)),
+        (trx, out: BuilderOutput, runId) => applyNewItems(trx, idea, runId, 'builder', out.items),
+      );
     await executePass(
       ctx,
       ideaId,
       analysisRequests.synthesize(await buildSnapshot(ctx.db, ideaId)),
-      (trx, out: SynthesizeOutput, runId) => applySynthesis(trx, idea, runId, out),
+      (trx, out: SynthesizeOutput, runId) => applySynthesis(trx, idea, runId, out, force),
     );
   });
 }

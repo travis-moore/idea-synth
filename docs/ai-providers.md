@@ -39,8 +39,11 @@ philosophy. `PROMPT_VERSION` is stored on every run; bump it when wording change
 1. `provider.generate(request)` → unknown
 2. `request.schema.parse(...)` — shape, enums, required provenance
 3. semantic checks while applying: every reference must be an existing item of this idea
-   or a key from the same output; kinds must be within the pass's remit; non-extract items
-   must link to what they arose from; a supplied premise is only legal at level 5
+   or a key from the same output; kinds **and edge types** must be within the pass's remit
+   (a model may never write `supersedes`, `merged_into`, `branches_to`, `synthesized_into`,
+   `answers` or evidence edges, and only `assumes` may point at a new item); non-extract
+   items must link to what they arose from; extracted items need a quote that is really in
+   the user's text to count as the user's; a supplied premise is only legal at level 5
 4. apply in **one transaction** with the `analysis_runs` row
 
 Any failure rolls the pass back and records a `failed` run with the reason. The API

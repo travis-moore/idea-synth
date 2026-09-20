@@ -126,7 +126,12 @@ export async function buildSnapshot(db: DbOrTrx, ideaId: string): Promise<IdeaSn
   ]);
   const latestQualification = new Map(qualifications.map((q) => [q.item_id, q.qualification]));
   return {
-    idea: { id: idea.id, title: idea.title, originalText: idea.original_text },
+    idea: {
+      id: idea.id,
+      title: idea.title,
+      originalText: idea.original_text,
+      originalTextOrigin: rows.find((r) => r.kind === 'original_idea')?.origin ?? 'user',
+    },
     items: rows.map((r) => ({
       id: r.id,
       runKey: r.run_key,

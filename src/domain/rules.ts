@@ -63,7 +63,9 @@ export function statusAfterDecision(input: DecisionInput): ItemStatus {
   if (author === 'agent' && !AGENT_ALLOWED.includes(decision) && !agentRetiringOwnRecord) {
     throw forbidden(`The agent may not record a "${decision}" decision; that belongs to the user.`);
   }
-  if (UNDECIDABLE_KINDS.includes(kind) && decision !== 'supersede') {
+  if (UNDECIDABLE_KINDS.includes(kind) && !agentRetiringOwnRecord) {
+    // A synthesis is replaced by building a new version, never by hand: otherwise the
+    // next synthesis run could not retire it and the idea would be stuck at this version.
     throw invalid(`Items of kind "${kind}" are records of the process and cannot be decided on.`);
   }
   if (kind === 'original_idea') {

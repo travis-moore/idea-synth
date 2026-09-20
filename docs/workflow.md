@@ -71,6 +71,13 @@ tidied.
 verbatim; quotes are stored with character offsets (`item_sources`). Each is linked
 `derived_from` the root or another extracted item. Extraction implies nothing about truth.
 
+An item is only labelled `extracted_from_user` if the captured text is the user's own
+**and** at least one quote is found in it (exactly, or after normalising whitespace and
+typographic quotes; offsets always point into the real text). An "extraction" with no
+locatable quote is stored as the **agent's** item and put to the user (`needs_user`,
+`clarification_needed`). When the idea is an un-reframed promoted tangent that the agent
+wrote, everything extracted from it is `agent` too.
+
 **3 · Explore.** Asks _"What interesting ideas follow from this even if one or more
 premises later turn out to be false?"_ Produces `implication` (follows from the user's
 idea), `extension` (AI-proposed), `analogy`, `question`, `hypothesis` — all `origin =
@@ -94,6 +101,9 @@ person, and distinguishes _wrong_ from _insufficiently supported_.
 `premise_needs_response`, `decision_required`). Each item has its own persistent discussion
 thread. `needs_user` items block Steps 6–8; `open` items do not (they surface as open
 questions). The user may override the gate; the override is logged as `gate.overridden`.
+The binding gate check happens **inside the transaction that commits the synthesis**, so
+an item that starts needing the user while the model is working still blocks, and an
+override is only ever recorded together with the synthesis it authorised.
 
 Possible outcomes for an item:
 
@@ -118,7 +128,9 @@ cascades to children.
 
 **6 · Builder.** Works only from survivors, respecting qualifications. Adds better
 formulations, `example`, `test`, `distinction`, connections and better questions. Builder
-items are proposals (`open`), not conclusions.
+items are proposals (`open`), not conclusions, and can never be `needs_user`: the Builder
+must not re-close the gate behind the user's back. If the synthesis step fails, a retry
+reuses the Builder run instead of generating duplicates.
 
 **7 · Synthesis.** A `synthesis` item plus `conclusion` items, and a structured body:
 what you initially thought · what changed · what was rejected · what remains uncertain ·

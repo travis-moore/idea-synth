@@ -8,6 +8,7 @@ import type { Transaction } from 'kysely';
 import type { Database, Db, DbOrTrx, ReasoningItemsTable } from '../db/schema';
 import { conflict, invalid, notFound } from '../domain/errors';
 import { newId } from '../domain/ids';
+import { locateQuote } from '../domain/quotes';
 import { statusAfterDecision, wouldCreateGenealogyCycle } from '../domain/rules';
 import type {
   Actor,
@@ -127,16 +128,16 @@ export async function createItem(
     })
     .execute();
   for (const quote of input.sourceQuotes ?? []) {
-    const start = input.idea.original_text.indexOf(quote);
+    const span = locateQuote(input.idea.original_text, quote);
     await db
       .insertInto('item_sources')
       .values({
         id: newId('src'),
         item_id: row.id,
         quote,
-        // A quote the model did not copy exactly is kept, but marked as unlocated.
-        start_offset: start >= 0 ? start : null,
-        end_offset: start >= 0 ? start + quote.length : null,
+        // Unlocated quotes are kept for the record; see applyNewItems for what that implies.
+        start_offset: span?.start ?? null,
+        end_offset: span?.end ?? null,
         created_at: now,
       })
       .execute();

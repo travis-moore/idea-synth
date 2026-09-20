@@ -15,15 +15,23 @@ import { tutorAssessRequest, tutorMoveRequest, type TutorTranscriptEntry } from 
 import type { TutorAssessOutput, TutorMoveOutput } from '../ai/schemas';
 import type { GuidedSessionDto } from '../api-types';
 import type { Database, DbOrTrx, GuidedSessionsTable, GuidedStepsTable } from '../db/schema';
-import { conflict, invalid, notFound } from '../domain/errors';
+import { conflict, DomainError, invalid, notFound } from '../domain/errors';
 import { newId } from '../domain/ids';
 import { nextScaffoldLevel, type PremiseStance, type ScaffoldLevel } from '../domain/scaffolding';
-import { USER_CREATABLE_KINDS } from '../domain/vocabulary';
+import { USER_CREATABLE_KINDS, type ItemStatus } from '../domain/vocabulary';
 import type { AppContext } from './context';
 import { captureIdea } from './ideas';
 import { supersedeItem } from './items';
 import { executePass, runAnalysis } from './pipeline';
-import { createItem, createRelation, logEvent, nowIso, recordDecision, requireIdea } from './store';
+import {
+  createItem,
+  createRelation,
+  logEvent,
+  nowIso,
+  recordDecision,
+  requireIdea,
+  requireItem,
+} from './store';
 
 type Trx = Transaction<Database>;
 type StepInput = Omit<
@@ -276,7 +284,13 @@ export async function startGuidedSession(
     });
     return id;
   });
-  await issueMove(ctx, sessionId);
+  try {
+    await issueMove(ctx, sessionId);
+  } catch (error) {
+    // The session exists and is recoverable with "continue" (`awaitingTutor`); losing its
+    // id to a provider hiccup would orphan it.
+    if (!(error instanceof DomainError && error.code === 'upstream')) throw error;
+  }
   return sessionId;
 }
 
@@ -378,6 +392,49 @@ export async function replyToTutor(ctx: AppContext, sessionId: string, input: { 
   await issueMove(ctx, sessionId);
 }
 
+/**
+ * A supplied premise is an ordinary item, so the user may already have dealt with it from
+ * the inbox or the item panel. In that case there is nothing left to decide: record what
+ * happened in the transcript and let the session move on, rather than deadlocking on a
+ * decision that can no longer be made.
+ */
+const HANDLED_ELSEWHERE: Partial<Record<ItemStatus, PremiseStance>> = {
+  accepted: 'accept',
+  qualified: 'accept',
+  rejected: 'reject',
+  tangent: 'reject',
+  superseded: 'modify',
+  split: 'modify',
+  merged: 'modify',
+};
+
+/** Returns true if the pending premise had been handled outside the session. */
+async function reconcilePremise(trx: Trx, session: GuidedSessionsTable): Promise<boolean> {
+  const premiseId = session.pending_premise_item_id;
+  if (!premiseId) return false;
+  const premise = await requireItem(trx, premiseId);
+  const stance = HANDLED_ELSEWHERE[premise.status];
+  if (!stance) return false;
+  await addStep(trx, session, {
+    author: 'user',
+    step_kind: 'premise_response',
+    level: 5,
+    body: `(Handled outside this session: the premise is now ${premise.status}.)`,
+    stance,
+    item_id: premiseId,
+  });
+  await closePremise(trx, session);
+  return true;
+}
+
+const closePremise = (trx: Trx, session: GuidedSessionsTable) =>
+  updateSession(trx, session.id, {
+    pending_premise_item_id: null,
+    current_question_item_id: null,
+    question_index: session.question_index + 1,
+    level: 1,
+  });
+
 export async function respondToPremise(
   ctx: AppContext,
   sessionId: string,
@@ -387,21 +444,16 @@ export async function respondToPremise(
   const premiseId = session.pending_premise_item_id;
   if (!premiseId) throw conflict('There is no agent-supplied premise waiting for a response.');
   const body = input.body?.trim() ?? '';
-  if (input.stance === 'modify' && !body) throw invalid('Say how you would put it instead.');
 
   await ctx.db.transaction().execute(async (trx) => {
+    if (await reconcilePremise(trx, session)) return;
+    if (input.stance === 'modify' && !body) throw invalid('Say how you would put it instead.');
+
     let itemId: string | null = premiseId;
-    if (input.stance === 'accept')
+    if (input.stance === 'accept' || input.stance === 'reject')
       await recordDecision(trx, {
         itemId: premiseId,
-        type: 'accept',
-        author: 'user',
-        rationale: body || null,
-      });
-    else if (input.stance === 'reject')
-      await recordDecision(trx, {
-        itemId: premiseId,
-        type: 'reject',
+        type: input.stance,
         author: 'user',
         rationale: body || null,
       });
@@ -428,12 +480,7 @@ export async function respondToPremise(
       stance: input.stance,
       item_id: itemId,
     });
-    await updateSession(trx, session.id, {
-      pending_premise_item_id: null,
-      current_question_item_id: null,
-      question_index: session.question_index + 1,
-      level: 1,
-    });
+    await closePremise(trx, session);
   });
   await issueMove(ctx, sessionId);
 }
@@ -450,12 +497,20 @@ export async function continueSession(ctx: AppContext, sessionId: string) {
 export async function handOffToSynthesis(ctx: AppContext, sessionId: string): Promise<string> {
   const session = await requireSession(ctx.db, sessionId);
   if (session.status === 'handed_off') throw conflict('This session has already been handed off.');
-  if (session.pending_premise_item_id)
-    throw conflict('Respond to the premise the agent supplied before handing off.');
+  const stillPending = await ctx.db
+    .transaction()
+    .execute(
+      async (trx) =>
+        session.pending_premise_item_id !== null && !(await reconcilePremise(trx, session)),
+    );
+  if (stillPending) throw conflict('Respond to the premise the agent supplied before handing off.');
+
+  // Only marked as handed off once the analysis has landed, so a failed run can be retried
+  // from here (runAnalysis resumes from the first pass that did not complete).
+  await runAnalysis(ctx, session.idea_id);
   await ctx.db
     .transaction()
     .execute((trx) => updateSession(trx, session.id, { status: 'handed_off' }));
-  await runAnalysis(ctx, session.idea_id);
   return session.idea_id;
 }
 

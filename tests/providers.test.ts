@@ -44,6 +44,7 @@ describe('mock provider', () => {
       idea: {
         id: 'i',
         title: 't',
+        originalTextOrigin: 'user' as const,
         originalText: 'Dogs bark because they are bored. Maybe cats are too?',
       },
       items: [],
