@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Idea Synth agent CLI. Works from any directory: it always uses this repository's database.
+set -euo pipefail
+ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+exec "$ROOT/node_modules/.bin/tsx" "$ROOT/src/cli/main.ts" "$@"
