@@ -115,10 +115,27 @@
   box-sizing: border-box;
 }
 
+html {
+  /* Stop iOS from inflating text in landscape; sizes are chosen deliberately. */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
 body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
+  overflow-wrap: break-word;
+}
+
+.app {
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.92em;
 }
 
 h1,
@@ -193,9 +210,14 @@ select:focus-visible,
 textarea:focus-visible,
 button:focus-visible,
 a:focus-visible,
-summary:focus-visible {
+summary:focus-visible,
+[tabindex]:focus-visible {
   outline: 2px solid var(--c-user);
   outline-offset: 1px;
+}
+/* A tap or click should not leave a ring behind; the keyboard still gets one. */
+:focus:not(:focus-visible) {
+  outline: none;
 }
 textarea:disabled {
   background: var(--surface-2);
@@ -494,13 +516,28 @@ label.check > input {
 
 /* --- App frame -------------------------------------------------------------------------- */
 
-.demo-banner {
+.mode-banner {
   padding: 0.3rem 1rem;
-  background: var(--c-agent-bg);
-  color: var(--c-agent);
+  padding-top: calc(0.3rem + env(safe-area-inset-top));
+  padding-left: calc(1rem + env(safe-area-inset-left));
+  padding-right: calc(1rem + env(safe-area-inset-right));
   border-bottom: 1px solid var(--border);
   font-size: 0.8rem;
   text-align: center;
+  text-wrap: balance;
+}
+.mode-banner.demo {
+  background: var(--c-agent-bg);
+  color: var(--c-agent);
+}
+/* Viewer mode is the normal way to use the page, so it is calm information, not a warning. */
+.mode-banner.viewer,
+.mode-banner.reasoning {
+  background: var(--surface-2);
+  color: var(--text-muted);
+}
+.mode-banner.viewer strong {
+  color: var(--text);
 }
 
 .top-nav {
@@ -511,6 +548,8 @@ label.check > input {
   align-items: center;
   gap: 2rem;
   padding: 0 1.5rem;
+  padding-left: calc(1.5rem + env(safe-area-inset-left));
+  padding-right: calc(1.5rem + env(safe-area-inset-right));
   background: var(--surface);
   border-bottom: 1px solid var(--border);
 }
@@ -518,29 +557,174 @@ label.check > input {
   font-weight: 700;
   color: var(--text);
   letter-spacing: -0.01em;
+  white-space: nowrap;
 }
-.top-nav nav {
+.main-nav {
   display: flex;
   gap: 0.25rem;
+  min-width: 0;
 }
-.top-nav nav a {
+.main-nav a {
   padding: 0.85rem 0.8rem;
   color: var(--text-muted);
   border-bottom: 2px solid transparent;
+  white-space: nowrap;
 }
-.top-nav nav a:hover {
+.main-nav a:hover {
   color: var(--text);
   text-decoration: none;
 }
-.top-nav nav a.active {
+.main-nav a.active {
   color: var(--text);
   border-bottom-color: var(--c-user);
+}
+.nav-short {
+  display: none;
+}
+
+.live-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45em;
+  margin-left: auto;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--c-accepted);
+}
+.live-off .live-dot {
+  background: var(--c-rejected);
+}
+.live-busy .live-dot {
+  animation: live-pulse 1.4s ease-out infinite;
+}
+@keyframes live-pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--c-accepted) 70%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 7px transparent;
+  }
 }
 
 .page {
   max-width: 1240px;
   margin: 0 auto;
   padding: 1.5rem;
+  padding-left: calc(1.5rem + env(safe-area-inset-left));
+  padding-right: calc(1.5rem + env(safe-area-inset-right));
+}
+
+/* --- Jobs and viewer mode ---------------------------------------------------------------- */
+
+.job-strip {
+  display: grid;
+  gap: 0.35rem;
+}
+.job {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.75rem;
+  align-items: center;
+  padding: 0.4rem 0.7rem;
+  background: var(--c-agent-bg);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--c-agent);
+  border-radius: 6px;
+  font-size: 0.85rem;
+}
+.job-failed,
+.job-interrupted {
+  background: var(--c-rejected-bg);
+  border-left-color: var(--c-rejected);
+}
+.job-cancelled {
+  background: var(--surface-2);
+  border-left-color: var(--c-open);
+}
+.job-main {
+  display: flex;
+  flex: 1 1 14rem;
+  flex-wrap: wrap;
+  gap: 0.15rem 0.6rem;
+  align-items: baseline;
+  min-width: 0;
+}
+.job-status {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.job-progress,
+.job-error {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.job-elapsed {
+  font-variant-numeric: tabular-nums;
+}
+.job-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+.job-action {
+  padding: 0.2em 0.7em;
+  font-size: 0.82rem;
+}
+.job-pulse {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--c-agent);
+  animation: job-pulse 1.2s ease-in-out infinite;
+}
+.job-queued .job-pulse {
+  background: var(--c-open);
+}
+@keyframes job-pulse {
+  50% {
+    opacity: 0.25;
+  }
+}
+.job .error-note {
+  flex-basis: 100%;
+  margin: 0;
+}
+
+.viewer-note {
+  margin: 0.5rem 0 0;
+  padding: 0.45rem 0.7rem;
+  background: var(--surface-2);
+  border-radius: 6px;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.chip.op-chip {
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+.chip.op-chip.external {
+  color: var(--c-agent);
+  background: var(--c-agent-bg);
+}
+.event-instruction,
+.relayed-note {
+  flex-basis: 100%;
+  margin: 0 0 0.25rem;
+  font-size: 0.82rem;
+  font-style: italic;
+  color: var(--c-agent);
 }
 
 /* --- Ideas page ------------------------------------------------------------------------- */
@@ -662,8 +846,17 @@ mark {
 }
 .workspace-title h1 {
   margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
+.stepper-summary {
+  display: none;
+  margin: 0;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
 .stepper {
   display: flex;
   flex-wrap: wrap;
@@ -718,8 +911,16 @@ mark {
   gap: 0.15rem;
   border-bottom: 1px solid var(--border);
   margin-bottom: 1.25rem;
+  overflow-x: auto;
+  scrollbar-width: none;
+  overscroll-behavior-x: contain;
+}
+.tabs::-webkit-scrollbar {
+  display: none;
 }
 .tab {
+  flex: none;
+  white-space: nowrap;
   border: none;
   border-bottom: 2px solid transparent;
   border-radius: 0;
@@ -866,17 +1067,33 @@ mark {
 
 /* --- Map ---------------------------------------------------------------------------------- */
 
+.map-tab {
+  display: flex;
+  flex-direction: column;
+}
 .map-toolbar {
   display: flex;
   flex-wrap: wrap;
-  gap: 1.25rem;
+  gap: 0.5rem 1.25rem;
   align-items: center;
   margin-bottom: 0.6rem;
   font-size: 0.88rem;
 }
+.map-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1.25rem;
+}
+/* Wide screens always show filters and legend; the toggle exists for phones only. */
+.map-options-toggle {
+  display: none;
+}
 .map-canvas {
   /* Fill the viewport below the header, tabs and toolbar so controls stay on screen. */
   height: max(440px, calc(100vh - 340px));
+  height: max(440px, calc(100dvh - 340px));
+  /* The canvas owns touch gestures inside it: one finger pans, two fingers zoom. */
+  touch-action: none;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -911,6 +1128,48 @@ mark {
 }
 .map-node.selected {
   box-shadow: 0 0 0 2px var(--c-user);
+}
+/* Just arrived (e.g. added by a coding agent through the CLI): glow, then settle. */
+.map-node.is-new {
+  animation: node-arrived 3s ease-out;
+}
+@keyframes node-arrived {
+  0%,
+  60% {
+    box-shadow:
+      0 0 0 3px var(--c-agent),
+      0 0 22px 6px color-mix(in srgb, var(--c-agent) 55%, transparent);
+  }
+  100% {
+    box-shadow:
+      0 0 0 0 transparent,
+      0 0 0 0 transparent;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .map-node.is-new {
+    animation: none;
+    outline: 3px solid var(--c-agent);
+  }
+  .live-busy .live-dot,
+  .job-pulse {
+    animation: none;
+  }
+}
+.map-panel button {
+  padding: 0.25em 0.8em;
+  font-size: 0.8rem;
+  box-shadow: var(--shadow);
+}
+.map-panel .map-new-toast {
+  background: var(--c-agent);
+  border-color: var(--c-agent);
+  color: #fff;
+  font-weight: 600;
+}
+.map-panel .map-new-toast:hover:not(:disabled) {
+  background: var(--c-agent);
+  filter: brightness(1.1);
 }
 .map-node.status-needs_user {
   box-shadow:
@@ -1160,6 +1419,26 @@ mark {
   color: var(--text-muted);
 }
 
+.run-model {
+  display: block;
+}
+.run-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin-top: 0.2rem;
+}
+.run-chips .chip {
+  text-transform: none;
+  letter-spacing: 0;
+}
+.run-note {
+  margin: 0.25rem 0 0;
+}
+.run-stale td {
+  background: color-mix(in srgb, var(--c-needs-bg) 45%, transparent);
+}
+
 .event-log {
   display: grid;
   gap: 1px;
@@ -1233,7 +1512,8 @@ mark {
 .drawer-body {
   flex: 1;
   overflow-y: auto;
-  padding: 1rem 1.1rem 3rem;
+  /* No top padding: the sticky badge row sits flush under the bar, with nothing peeking above. */
+  padding: 0 1.1rem 3rem;
 }
 
 .item-page {
@@ -1248,6 +1528,33 @@ mark {
   font-size: 0.85rem;
 }
 
+.item-panel-badges {
+  padding: 0.35rem 0 0.35rem 0.85rem;
+  border-left: 4px solid var(--c-open);
+}
+/* In the drawer the badges stay in view while the panel scrolls: you always know whose
+   item this is and what state it is in. */
+.drawer-body > .loading,
+.drawer-body > .error-note {
+  margin-top: 1rem;
+}
+.drawer .item-panel-badges {
+  position: sticky;
+  top: 0;
+  padding-top: 0.7rem;
+  z-index: 2;
+  background: var(--surface);
+  box-shadow: 0 1px 0 var(--border);
+}
+.item-panel.origin-user .item-panel-badges {
+  border-left-color: var(--c-user);
+}
+.item-panel.origin-extracted_from_user .item-panel-badges {
+  border-left-color: var(--c-extracted);
+}
+.item-panel.origin-agent .item-panel-badges {
+  border-left-color: var(--c-agent);
+}
 .item-panel-header {
   padding-left: 0.85rem;
   border-left: 4px solid var(--c-open);
@@ -1262,7 +1569,7 @@ mark {
   border-left-color: var(--c-agent);
 }
 .item-panel-text {
-  margin: 0.6rem 0 0.4rem;
+  margin: 0.3rem 0 0.4rem;
   font-size: 1.12rem;
   line-height: 1.5;
   white-space: pre-wrap;
@@ -1591,6 +1898,12 @@ summary {
   background: var(--c-needs-bg);
   border-radius: 6px;
 }
+.notice.calm {
+  background: var(--c-agent-bg);
+}
+.notice p:last-child {
+  margin-bottom: 0;
+}
 
 /* --- Narrow screens ----------------------------------------------------------------------------- */
 
@@ -1604,5 +1917,426 @@ summary {
   }
   .idea-row {
     grid-template-columns: 1fr;
+    gap: 0.5rem;
+  }
+  .idea-row-chips,
+  .idea-row-counts {
+    flex-wrap: wrap;
+  }
+  /* Tablets: the nine-step strip scrolls sideways instead of wrapping into a block. */
+  .stepper {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+    padding-bottom: 2px;
+  }
+  .stepper::-webkit-scrollbar {
+    display: none;
+  }
+  .step {
+    flex: none;
+  }
+  .top-nav {
+    gap: 1rem;
+  }
+  .map-count-long {
+    display: none;
+  }
+}
+
+/* Phones (and narrow split-screen windows): touch first. */
+@media (max-width: 700px) {
+  :root {
+    --bottom-nav-height: 3.5rem;
+  }
+
+  h1 {
+    font-size: 1.25rem;
+  }
+
+  /* 16px stops iOS Safari from zooming the page when a field is focused. */
+  input[type='text'],
+  input[type='url'],
+  select,
+  textarea,
+  label > input,
+  label > textarea,
+  label > select,
+  .idea-input {
+    font-size: 16px;
+  }
+
+  button,
+  .button-link,
+  select {
+    min-height: 44px;
+  }
+  .button-link {
+    display: inline-flex;
+    align-items: center;
+  }
+  /* Inline chips and log rows stay compact, but are still comfortably tappable. */
+  .item-chip {
+    min-height: 32px;
+    align-items: center;
+    padding: 0.25em 0.6em;
+    margin: 0.15rem 0.2rem 0.15rem 0;
+  }
+  .event-row {
+    min-height: 0;
+    padding: 0.5rem 0.4rem;
+  }
+  label.check {
+    align-items: center;
+    min-height: 40px;
+  }
+  label.check > input {
+    width: 20px;
+    height: 20px;
+    margin: 0;
+  }
+
+  .top-nav {
+    gap: 0.75rem;
+    padding: 0 1rem;
+    padding-left: calc(1rem + env(safe-area-inset-left));
+    padding-right: calc(1rem + env(safe-area-inset-right));
+    min-height: 2.75rem;
+  }
+  /* The main nav becomes a bottom tab bar, within thumb reach. */
+  .main-nav {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 30;
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 0;
+    padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    box-shadow: 0 -2px 10px rgb(16 24 40 / 8%);
+  }
+  .main-nav a {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: var(--bottom-nav-height);
+    padding: 0.25rem;
+    border-bottom: none;
+    border-top: 2px solid transparent;
+    font-size: 0.85rem;
+  }
+  .main-nav a.active {
+    border-top-color: var(--c-user);
+    font-weight: 600;
+  }
+  .nav-long {
+    display: none;
+  }
+  .nav-short {
+    display: inline;
+  }
+
+  .page {
+    padding: 1rem;
+    padding-left: calc(1rem + env(safe-area-inset-left));
+    padding-right: calc(1rem + env(safe-area-inset-right));
+    padding-bottom: calc(var(--bottom-nav-height) + 1.5rem + env(safe-area-inset-bottom));
+  }
+  .panel {
+    padding: 0.9rem;
+  }
+  /* On a phone you mostly come to look at an idea: the list leads, the forms follow. */
+  .ideas-page {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+  }
+  .ideas-section {
+    order: -1;
+  }
+  .entry-forms {
+    margin-bottom: 0;
+  }
+  .idea-input {
+    max-height: 9rem;
+  }
+  .form-actions > button,
+  .form-actions > .button-link {
+    flex: 1 1 auto;
+  }
+  .idea-row-text {
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+  }
+
+  /* One compact block: title, then stage badge and the one-line progress side by side. */
+  .workspace-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.3rem 0.5rem;
+    margin-bottom: 0.4rem;
+  }
+  .workspace-title,
+  .stepper-wrap {
+    display: contents;
+  }
+  .workspace-title h1,
+  .workspace-header .job-strip {
+    flex-basis: 100%;
+  }
+  /* Nine pills do not fit a phone: one line says where the idea is. */
+  .stepper {
+    display: none;
+  }
+  .stepper-summary {
+    display: block;
+    font-size: 0.8rem;
+  }
+  .tabs {
+    margin: 0 -1rem 0.75rem;
+    padding: 0 0.5rem;
+  }
+  .tab {
+    min-height: 44px;
+    padding: 0.5rem 0.8rem;
+  }
+
+  /* Map: the canvas takes the screen; legend and filters wait behind the toggle. */
+  .map-toolbar {
+    margin-bottom: 0.5rem;
+    justify-content: space-between;
+  }
+  .map-options-toggle {
+    display: inline-block;
+    min-height: 40px;
+  }
+  .map-filters,
+  .map-legend {
+    display: none;
+  }
+  .map-tab.options-open .map-filters {
+    display: grid;
+    flex-basis: 100%;
+    order: 3;
+    gap: 0;
+  }
+  .map-tab.options-open .map-legend {
+    display: grid;
+    order: -1;
+    margin: 0 0 0.6rem;
+    padding: 0.6rem 0.75rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+  }
+  .map-tab .map-toolbar {
+    order: -2;
+  }
+  .legend-title {
+    width: 100%;
+  }
+  .map-canvas {
+    /* Everything above it plus the bottom tab bar: the whole map fits on one screen, so the
+       page never has to be scrolled with a finger that the canvas would capture. */
+    height: max(320px, calc(100vh - 24rem));
+    height: max(320px, calc(100dvh - 24rem - env(safe-area-inset-bottom)));
+    margin: 0 -1rem;
+    border-left: none;
+    border-right: none;
+    border-radius: 0;
+  }
+  .map-canvas .react-flow__minimap {
+    display: none;
+  }
+  .map-canvas .react-flow__controls-button {
+    width: 40px;
+    height: 40px;
+  }
+  .map-panel button {
+    min-height: 40px;
+    font-size: 0.85rem;
+  }
+
+  /* Item panel: a full-screen sheet with a fixed bar; the body scrolls under it. */
+  .drawer {
+    inset: 0;
+    width: auto;
+    border-left: none;
+    animation-name: sheet-in;
+  }
+  .drawer-bar {
+    padding: 0.25rem 0.5rem 0.25rem 1rem;
+    padding-top: calc(0.25rem + env(safe-area-inset-top));
+    padding-left: calc(1rem + env(safe-area-inset-left));
+    padding-right: calc(0.5rem + env(safe-area-inset-right));
+    background: var(--surface);
+  }
+  .drawer-body {
+    padding: 0 1rem 2rem;
+    padding-left: calc(1rem + env(safe-area-inset-left));
+    padding-right: calc(1rem + env(safe-area-inset-right));
+    padding-bottom: calc(2.5rem + env(safe-area-inset-bottom));
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+  .item-page {
+    padding: 1rem 1rem 2rem;
+    margin: 0 -0.5rem;
+  }
+  .item-panel-text {
+    font-size: 1.05rem;
+  }
+  .decide-buttons {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.5rem;
+  }
+  .decide-buttons button {
+    min-height: 48px;
+    padding: 0.4em 0.5em;
+    line-height: 1.25;
+  }
+  .split-part {
+    flex-wrap: wrap;
+  }
+  /* Collapsed sections are opened with a thumb: give the summary a real target. */
+  .panel-section > summary,
+  .sub-form > summary {
+    padding: 0.75rem 0;
+  }
+  .message.author-user {
+    margin-right: 0.5rem;
+  }
+  .message.author-agent {
+    margin-left: 0.5rem;
+  }
+
+  .synthesis-statement {
+    padding: 0.8rem 0.9rem;
+    font-size: 1.08rem;
+  }
+  .version-select {
+    margin-left: 0;
+  }
+  .tangent-actions {
+    padding-left: 0;
+  }
+
+  /* The runs table becomes a stack of labelled cards. */
+  .runs-table,
+  .runs-table tbody,
+  .runs-table tr,
+  .runs-table td {
+    display: block;
+    width: 100%;
+  }
+  .runs-table {
+    border: none;
+    background: transparent;
+  }
+  .runs-table thead {
+    display: none;
+  }
+  .runs-table tr {
+    margin-bottom: 0.5rem;
+    padding: 0.4rem 0.75rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+  }
+  .runs-table td {
+    display: grid;
+    grid-template-columns: 7.5rem minmax(0, 1fr);
+    gap: 0.5rem;
+    padding: 0.2rem 0;
+    border-bottom: none;
+    background: transparent;
+  }
+  .runs-table td > * {
+    grid-column: 2;
+    justify-self: start;
+  }
+  .runs-table td::before {
+    content: attr(data-label);
+    grid-column: 1;
+    grid-row: 1 / span 3;
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    padding-top: 0.2em;
+  }
+  .event-seq {
+    width: auto;
+  }
+
+  /* Guided: the level meter is a slim bar above the transcript; hand-off follows below. */
+  .guided {
+    gap: 0.75rem;
+  }
+  .guided-side {
+    display: contents;
+  }
+  .guided-side .level-meter {
+    order: -1;
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 0.25rem 0.75rem;
+    align-items: center;
+    padding: 0.5rem 0.75rem;
+  }
+  .guided-side .level-meter .level-meter-head {
+    display: block;
+  }
+  .guided-side .level-meter .section-label {
+    margin: 0;
+  }
+  .guided-side .level-meter .level-steps {
+    margin: 0;
+  }
+  .guided-side .level-meter .hint {
+    grid-column: 1 / -1;
+    margin: 0;
+    font-size: 0.78rem;
+  }
+  .guided-step.author-user {
+    margin-left: 0.75rem;
+  }
+  .guided-options button {
+    white-space: normal;
+  }
+
+  .job {
+    padding: 0.5rem 0.6rem;
+  }
+  .job-action {
+    min-height: 40px;
+  }
+  .live-indicator {
+    font-size: 0.74rem;
+  }
+  .empty-state {
+    padding: 1.5rem 1rem;
+  }
+}
+
+@keyframes sheet-in {
+  from {
+    transform: translateY(24px);
+    opacity: 0;
+  }
+}
+
+/* Very narrow phones: keep the live indicator to its dot plus a word. */
+@media (max-width: 380px) {
+  .mode-banner {
+    font-size: 0.74rem;
   }
 }

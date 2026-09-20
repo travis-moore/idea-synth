@@ -4,6 +4,7 @@
  */
 import type {
   ApiErrorDto,
+  ChangesDto,
   EventDto,
   GraphDto,
   GuidedSessionDto,
@@ -11,6 +12,7 @@ import type {
   IdeaSummaryDto,
   ItemDetailDto,
   ItemWithIdeaDto,
+  JobDto,
   MetaDto,
   RunDto,
   SynthesisDto,
@@ -21,12 +23,21 @@ import type { DecisionType, ItemKind } from '../../src/domain/vocabulary';
 export class ApiError extends Error {
   readonly status: number;
   readonly code: string;
+  /** Machine-readable extras, e.g. `blockingItemIds` when the review gate refuses. */
+  readonly details: Record<string, unknown> | undefined;
 
-  constructor(status: number, code: string, message: string) {
+  constructor(status: number, code: string, message: string, details?: Record<string, unknown>) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.code = code;
+    this.details = details;
+  }
+
+  /** A string-array detail (e.g. `blockingItemIds`), or null when the server sent none. */
+  detailIds(key: string): string[] | null {
+    const value = this.details?.[key];
+    return Array.isArray(value) && value.every((v) => typeof v === 'string') ? value : null;
   }
 }
 
@@ -41,12 +52,38 @@ function isApiErrorDto(value: unknown): value is ApiErrorDto {
   );
 }
 
-async function request<T>(method: 'GET' | 'POST', path: string, body?: unknown): Promise<T> {
+const TOKEN_HEADER = 'x-idea-synth-token';
+
+/**
+ * Every state-changing request carries a session token that only a same-origin page can
+ * read (see src/server/security.ts). It is fetched once and kept in memory only.
+ */
+let tokenRequest: Promise<string> | null = null;
+
+function sessionToken(): Promise<string> {
+  tokenRequest ??= send<{ token: string }>('GET', '/session')
+    .then((session) => session.token)
+    .catch((error: unknown) => {
+      tokenRequest = null;
+      throw error;
+    });
+  return tokenRequest;
+}
+
+async function send<T>(
+  method: 'GET' | 'POST',
+  path: string,
+  body?: unknown,
+  token?: string,
+): Promise<T> {
   let response: Response;
+  const headers: Record<string, string> = {};
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  if (token !== undefined) headers[TOKEN_HEADER] = token;
   try {
     response = await fetch(`/api${path}`, {
       method,
-      headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
+      headers,
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   } catch {
@@ -55,11 +92,24 @@ async function request<T>(method: 'GET' | 'POST', path: string, body?: unknown):
   const payload: unknown = await response.json().catch(() => null);
   if (!response.ok) {
     if (isApiErrorDto(payload)) {
-      throw new ApiError(response.status, payload.error.code, payload.error.message);
+      const { code, message, details } = payload.error;
+      throw new ApiError(response.status, code, message, details);
     }
     throw new ApiError(response.status, 'unknown', `Request failed (${response.status}).`);
   }
   return payload as T;
+}
+
+async function request<T>(method: 'GET' | 'POST', path: string, body?: unknown): Promise<T> {
+  if (method === 'GET') return send<T>(method, path);
+  try {
+    return await send<T>(method, path, body, await sessionToken());
+  } catch (error) {
+    // The token changes if the server was reinstalled: fetch it again, once.
+    if (!(error instanceof ApiError) || error.status !== 401) throw error;
+    tokenRequest = null;
+    return send<T>(method, path, body, await sessionToken());
+  }
 }
 
 const get = <T>(path: string) => request<T>('GET', path);
@@ -120,6 +170,13 @@ export interface EvidenceInput {
 
 export const api = {
   getMeta: () => get<MetaDto>('/meta'),
+  getChanges: () => get<ChangesDto>('/changes'),
+
+  /** Recent jobs for one idea, newest first (active and finished). */
+  listJobs: (ideaId: string) => get<JobDto[]>(withQuery('/jobs', { ideaId })),
+  listActiveJobs: (ideaId?: string) => get<JobDto[]>(withQuery('/jobs', { ideaId, active: 1 })),
+  getJob: (jobId: string) => get<JobDto>(`/jobs/${id(jobId)}`),
+  cancelJob: (jobId: string) => post<JobDto>(`/jobs/${id(jobId)}/cancel`),
 
   listIdeas: () => get<IdeaSummaryDto[]>('/ideas'),
   captureIdea: (body: { text: string; title?: string }) => post<IdeaDto>('/ideas', body),
@@ -129,9 +186,17 @@ export const api = {
   listEvents: (ideaId: string) => get<EventDto[]>(`/ideas/${id(ideaId)}/events`),
   getSynthesis: (ideaId: string, version?: number) =>
     get<SynthesisDto | null>(withQuery(`/ideas/${id(ideaId)}/synthesis`, { version })),
-  analyze: (ideaId: string) => post<IdeaDto>(`/ideas/${id(ideaId)}/analyze`),
-  synthesize: (ideaId: string, force: boolean) =>
-    post<SynthesisDto | null>(`/ideas/${id(ideaId)}/synthesize`, force ? { force: true } : {}),
+  /** Queues Steps 2-5. Answers at once with the job; the result arrives through the live view. */
+  analyze: (ideaId: string) => post<JobDto>(`/ideas/${id(ideaId)}/analyze`),
+  /**
+   * Queues Steps 6-8. `overrideBlockingItemIds` must be exactly the blocking items the user
+   * was shown when they chose to proceed anyway; the server refuses (409) otherwise.
+   */
+  synthesize: (ideaId: string, overrideBlockingItemIds?: string[]) =>
+    post<JobDto>(
+      `/ideas/${id(ideaId)}/synthesize`,
+      overrideBlockingItemIds?.length ? { overrideBlockingItemIds } : {},
+    ),
 
   listInbox: (ideaId?: string) => get<ItemWithIdeaDto[]>(withQuery('/inbox', { ideaId })),
   listOpenQuestions: (ideaId?: string) =>
@@ -141,7 +206,7 @@ export const api = {
   getItem: (itemId: string) => get<ItemDetailDto>(`/items/${id(itemId)}`),
   mergeItems: (body: MergeInput) => post<ItemDetailDto>('/items/merge', body),
   postMessage: (itemId: string, body: { body: string; askAgent: boolean }) =>
-    post<ItemDetailDto>(`/items/${id(itemId)}/messages`, body),
+    post<{ detail: ItemDetailDto; job: JobDto | null }>(`/items/${id(itemId)}/messages`, body),
   decide: (itemId: string, body: DecisionInput) =>
     post<ItemDetailDto>(`/items/${id(itemId)}/decisions`, body),
   splitItem: (itemId: string, body: { children: ChildInput[]; rationale?: string }) =>
@@ -165,5 +230,7 @@ export const api = {
     post<GuidedSessionDto>(`/guided/${id(sessionId)}/premise`, body),
   continueGuided: (sessionId: string) =>
     post<GuidedSessionDto>(`/guided/${id(sessionId)}/continue`),
-  handOffGuided: (sessionId: string) => post<IdeaDto>(`/guided/${id(sessionId)}/handoff`),
+  retryGuidedAssessment: (sessionId: string) =>
+    post<GuidedSessionDto>(`/guided/${id(sessionId)}/retry-assessment`),
+  handOffGuided: (sessionId: string) => post<JobDto>(`/guided/${id(sessionId)}/handoff`),
 };

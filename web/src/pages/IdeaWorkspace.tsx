@@ -1,5 +1,6 @@
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { EmptyState, ErrorNote, Loading } from '../components/Feedback';
+import { JobStrip } from '../components/JobStrip';
 import { Stepper } from '../components/Stepper';
 import { SOURCE_LABELS, STAGE_LABELS } from '../labels';
 import { useIdea } from '../queries';
@@ -10,10 +11,11 @@ import { ReviewTab } from '../tabs/ReviewTab';
 import { SynthesisTab } from '../tabs/SynthesisTab';
 import { TangentsTab } from '../tabs/TangentsTab';
 
+// The map comes first: the workspace is primarily a live view of the reasoning graph.
 const TABS = [
+  { id: 'map', label: 'Map' },
   { id: 'overview', label: 'Overview' },
   { id: 'review', label: 'Review' },
-  { id: 'map', label: 'Map' },
   { id: 'synthesis', label: 'Synthesis' },
   { id: 'tangents', label: 'Tangents' },
   { id: 'history', label: 'History' },
@@ -30,7 +32,7 @@ export function IdeaWorkspace() {
   const idea = useIdea(ideaId);
 
   const rawTab = params.get('tab');
-  const activeTab: TabId = isTabId(rawTab) ? rawTab : 'overview';
+  const activeTab: TabId = isTabId(rawTab) ? rawTab : 'map';
   const selectTab = (tab: TabId) => {
     setParams((current) => {
       const next = new URLSearchParams(current);
@@ -40,8 +42,10 @@ export function IdeaWorkspace() {
     });
   };
 
-  if (idea.isPending) return <Loading />;
-  if (idea.error) {
+  // A failed background refresh must not tear down what the user is looking at.
+  const data = idea.data;
+  if (!data) {
+    if (!idea.error) return <Loading />;
     return (
       <EmptyState title="Could not open this idea">
         <ErrorNote error={idea.error} />
@@ -49,7 +53,6 @@ export function IdeaWorkspace() {
     );
   }
 
-  const data = idea.data;
   const sourceLabel = SOURCE_LABELS[data.source];
   return (
     <>
@@ -65,9 +68,10 @@ export function IdeaWorkspace() {
           )}
         </div>
         <Stepper stage={data.stage} />
+        <JobStrip ideaId={data.id} />
       </header>
 
-      <div className="tabs" role="tablist">
+      <div className="tabs" role="tablist" aria-label="Idea views">
         {TABS.map((tab) => (
           <button
             key={tab.id}

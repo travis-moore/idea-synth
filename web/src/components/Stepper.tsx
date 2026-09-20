@@ -36,8 +36,25 @@ function stateOf(index: number, stage: IdeaStage): StepState {
   }
 }
 
+/** One line for phones, where nine pills do not fit. */
+const SUMMARY: Record<IdeaStage, string> = {
+  guided: 'Step 1 of 8 · Capture, with guidance',
+  captured: 'Step 1 of 8 done · Next: analysis (Steps 2–5)',
+  in_review: 'Steps 1–5 done · Now: your review',
+  synthesized: 'All 8 steps done · Synthesis ready',
+};
+
 /** The eight-step workflow plus the human review gate, derived from the idea's stage. */
 export function Stepper({ stage }: { stage: IdeaStage }) {
+  return (
+    <div className="stepper-wrap">
+      <p className={`stepper-summary stage-${stage}`}>{SUMMARY[stage]}</p>
+      <StepList stage={stage} />
+    </div>
+  );
+}
+
+function StepList({ stage }: { stage: IdeaStage }) {
   return (
     <ol className="stepper" aria-label="Workflow progress">
       {STEPS.map((step, index) => {

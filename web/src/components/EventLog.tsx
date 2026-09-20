@@ -1,7 +1,26 @@
 import type { EventDto } from '../../../src/api-types';
 import { useOpenItem } from '../itemNavigation';
-import { formatTime } from '../labels';
+import { describeOperation, formatTime } from '../labels';
 import { ActorBadge } from './Badges';
+
+/** Which client executed the operation: the web page, or a coding agent through the CLI. */
+export function OperationChip({ operation }: { operation: NonNullable<EventDto['operation']> }) {
+  const external = operation.client !== 'web';
+  const title = [
+    operation.clientSession ? `session ${operation.clientSession}` : null,
+    operation.userInstruction ? `you said: “${operation.userInstruction}”` : null,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  return (
+    <span
+      className={external ? 'chip op-chip external' : 'chip op-chip'}
+      title={title || undefined}
+    >
+      {describeOperation(operation)}
+    </span>
+  );
+}
 
 function compactPayload(payload: Record<string, unknown>): string {
   return Object.entries(payload)
@@ -22,8 +41,14 @@ export function EventLog({ events }: { events: EventDto[] }) {
             <span className="event-seq">#{event.seq}</span>
             <ActorBadge actor={event.actor} />
             <span className="event-type">{event.type}</span>
+            {event.operation && <OperationChip operation={event.operation} />}
             <span className="event-payload">{compactPayload(event.payload)}</span>
             <time className="muted">{formatTime(event.createdAt)}</time>
+            {event.operation?.userInstruction && (
+              <span className="event-instruction">
+                you said: “{event.operation.userInstruction}”
+              </span>
+            )}
           </>
         );
         return (

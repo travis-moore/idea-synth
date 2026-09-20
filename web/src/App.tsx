@@ -6,15 +6,57 @@ import { IdeasPage } from './pages/IdeasPage';
 import { IdeaWorkspace } from './pages/IdeaWorkspace';
 import { ItemPage } from './pages/ItemPage';
 import { InboxPage, OpenQuestionsPage, TangentLibraryPage } from './pages/WorkspaceLists';
+import { liveLabel } from './live/poller';
+import { useLivePoller, useLiveState } from './live/useLive';
 import { useInbox, useMeta } from './queries';
 
-function DemoBanner() {
+/**
+ * Says honestly where reasoning happens. Viewer mode is the normal case: the user talks to a
+ * coding agent in VS Code, and this page is a live view of the shared state.
+ */
+function ModeBanner() {
   const meta = useMeta();
-  if (!meta.data || meta.data.live) return null;
+  if (!meta.data) return null;
+  const { canReason, live, provider, providerStatus } = meta.data;
+  if (!canReason) {
+    return (
+      <div className="mode-banner viewer" role="status">
+        <strong>Viewer mode</strong> — reasoning happens in your VS Code agent
+        <span className="nav-long">
+          {' '}
+          (Claude Code or Codex) through the <code>synth</code> CLI
+        </span>
+        . This page updates live.
+      </div>
+    );
+  }
+  if (!live) {
+    return (
+      <div className="mode-banner demo" role="status">
+        Demo mode — AI responses are deterministic mock data
+        <span className="nav-long"> (provider: {provider})</span>
+      </div>
+    );
+  }
   return (
-    <div className="demo-banner" role="status">
-      Demo mode — AI responses are deterministic mock data (provider: {meta.data.provider})
+    <div className="mode-banner reasoning" role="status">
+      Web reasoning: {providerStatus}
     </div>
+  );
+}
+
+function LiveIndicator() {
+  const live = useLiveState();
+  const label = liveLabel(live);
+  return (
+    <span
+      className={`live-indicator live-${label.tone}`}
+      role="status"
+      title="This page follows changes made anywhere — here, or by your coding agent through the CLI."
+    >
+      <span className="live-dot" aria-hidden="true" />
+      <span className="live-text">{label.text}</span>
+    </span>
   );
 }
 
@@ -26,7 +68,8 @@ function TopNav() {
       <NavLink to="/" className="brand" end>
         Idea Synth
       </NavLink>
-      <nav aria-label="Main">
+      {/* One nav: a row in the header on wide screens, a bottom tab bar on phones (CSS). */}
+      <nav aria-label="Main" className="main-nav">
         <NavLink to="/" end>
           Ideas
         </NavLink>
@@ -38,17 +81,24 @@ function TopNav() {
             </span>
           )}
         </NavLink>
-        <NavLink to="/open-questions">Open Questions</NavLink>
-        <NavLink to="/tangents">Tangent Library</NavLink>
+        <NavLink to="/open-questions">
+          <span className="nav-long">Open </span>Questions
+        </NavLink>
+        <NavLink to="/tangents">
+          Tangent<span className="nav-long"> Library</span>
+          <span className="nav-short">s</span>
+        </NavLink>
       </nav>
+      <LiveIndicator />
     </header>
   );
 }
 
 export function App() {
+  useLivePoller();
   return (
     <div className="app">
-      <DemoBanner />
+      <ModeBanner />
       <TopNav />
       <main className="page">
         <Routes>

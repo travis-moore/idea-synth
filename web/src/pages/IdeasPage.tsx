@@ -5,13 +5,17 @@ import type { IdeaSummaryDto } from '../../../src/api-types';
 import { api } from '../api';
 import { EmptyState, ErrorNote, Loading } from '../components/Feedback';
 import { SOURCE_LABELS, STAGE_LABELS, truncate } from '../labels';
-import { useAction, useIdeas } from '../queries';
+import { useAction, useIdeas, useViewerMode } from '../queries';
 
 function CaptureForm() {
   const navigate = useNavigate();
   const [text, setText] = useState('');
   const [title, setTitle] = useState('');
-  const capture = useAction(api.captureIdea, (idea) => void navigate(`/ideas/${idea.id}`));
+  // A new idea has a one-node graph: start on the overview, where the next step is offered.
+  const capture = useAction(
+    api.captureIdea,
+    (idea) => void navigate(`/ideas/${idea.id}?tab=overview`),
+  );
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
@@ -54,6 +58,7 @@ function CaptureForm() {
 function GuidedForm() {
   const navigate = useNavigate();
   const [hypothesis, setHypothesis] = useState('');
+  const viewer = useViewerMode();
   const start = useAction(api.startGuided, (session) => void navigate(`/guided/${session.id}`));
 
   const submit = (event: FormEvent) => {
@@ -68,6 +73,12 @@ function GuidedForm() {
         Start from a half-formed hunch. The AI asks questions so that the reasoning stays yours, and
         only offers more help when you are stuck.
       </p>
+      {viewer && (
+        <p className="viewer-note">
+          Viewer mode: your hypothesis is saved here, and the tutor’s questions will be produced by
+          your VS Code agent.
+        </p>
+      )}
       <input
         type="text"
         value={hypothesis}
@@ -120,12 +131,12 @@ function IdeaRow({ idea }: { idea: IdeaSummaryDto }) {
 export function IdeasPage() {
   const ideas = useIdeas();
   return (
-    <>
+    <div className="ideas-page">
       <div className="entry-forms">
         <CaptureForm />
         <GuidedForm />
       </div>
-      <section>
+      <section className="ideas-section">
         <h1>Ideas</h1>
         {ideas.isPending && <Loading />}
         <ErrorNote error={ideas.error} />
@@ -142,6 +153,6 @@ export function IdeasPage() {
           </ul>
         )}
       </section>
-    </>
+    </div>
   );
 }

@@ -4,8 +4,10 @@
  */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { QueryClient } from '@tanstack/react-query';
+import type { JobDto } from '../../src/api-types';
 import { api } from './api';
 import type { ApiError } from './api';
+import { requestLiveCheck } from './live/poller';
 
 export const keys = {
   meta: ['meta'] as const,
@@ -21,6 +23,7 @@ export const keys = {
   tangents: (ideaId: string | undefined) => ['tangents', ideaId ?? 'all'] as const,
   item: (itemId: string) => ['item', itemId] as const,
   guided: (sessionId: string) => ['guided', sessionId] as const,
+  jobs: (ideaId: string) => ['jobs', ideaId] as const,
 };
 
 /**
@@ -41,6 +44,8 @@ export function useAction<TInput, TResult>(
     mutationFn: run,
     onSuccess: async (result, input) => {
       await invalidateReasoning(client);
+      // The write may have queued a job: let the live view notice now, not in two seconds.
+      requestLiveCheck();
       onDone?.(result, input);
     },
     // A failed write may still have changed something (e.g. your message was saved but the
@@ -50,7 +55,22 @@ export function useAction<TInput, TResult>(
 }
 
 export const useMeta = () =>
-  useQuery({ queryKey: keys.meta, queryFn: api.getMeta, staleTime: Infinity });
+  useQuery({ queryKey: keys.meta, queryFn: api.getMeta, staleTime: 60_000 });
+
+/**
+ * Whether this page may start reasoning. False in viewer mode (no provider configured for
+ * the web UI), and while the answer is still unknown, so that nothing is offered too early.
+ */
+export function useCanReason(): boolean {
+  return useMeta().data?.canReason ?? false;
+}
+
+/** True once the server has said it cannot reason for the web UI (never while still unknown). */
+export function useViewerMode(): boolean {
+  const meta = useMeta().data;
+  return meta !== undefined && !meta.canReason;
+}
+
 export const useIdeas = () => useQuery({ queryKey: keys.ideas, queryFn: api.listIdeas });
 export const useIdea = (ideaId: string) =>
   useQuery({ queryKey: keys.idea(ideaId), queryFn: () => api.getIdea(ideaId) });
@@ -74,3 +94,17 @@ export const useItem = (itemId: string) =>
   useQuery({ queryKey: keys.item(itemId), queryFn: () => api.getItem(itemId) });
 export const useGuided = (sessionId: string) =>
   useQuery({ queryKey: keys.guided(sessionId), queryFn: () => api.getGuided(sessionId) });
+
+const ACTIVE_JOB_STATUSES: ReadonlySet<JobDto['status']> = new Set(['queued', 'running']);
+export const isActiveJob = (job: JobDto): boolean => ACTIVE_JOB_STATUSES.has(job.status);
+
+/**
+ * Recent jobs of one idea, newest first. Not polled here: the live poller refreshes it while
+ * any job is active, and this query recovers the state after navigation or a reload.
+ */
+export const useJobs = (ideaId: string | undefined) =>
+  useQuery({
+    queryKey: keys.jobs(ideaId ?? ''),
+    queryFn: () => api.listJobs(ideaId ?? ''),
+    enabled: Boolean(ideaId),
+  });

@@ -3,7 +3,8 @@ import type { Node, NodeProps } from '@xyflow/react';
 import type { ItemDto } from '../../../src/api-types';
 import { KIND_LABELS, ORIGIN_LABELS, STATUS_LABELS, truncate } from '../labels';
 
-export type ItemFlowNode = Node<{ item: ItemDto }, 'item'>;
+/** `isNew`: the item arrived while the map was open (e.g. added by a coding agent): it glows briefly. */
+export type ItemFlowNode = Node<{ item: ItemDto; isNew: boolean }, 'item'>;
 
 /**
  * Handles on both sides, in both roles: edges keep their semantic direction, so an edge may
@@ -25,6 +26,7 @@ export function ItemNode({ data, selected }: NodeProps<ItemFlowNode>) {
     `kind-${item.kind}`,
   ];
   if (selected) classes.push('selected');
+  if (data.isNew) classes.push('is-new');
   const productive = item.productiveDescendantIds.length > 0;
   return (
     <div className={classes.join(' ')} title={item.text}>

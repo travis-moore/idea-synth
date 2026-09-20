@@ -1,9 +1,10 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { GraphDto, IdeaDto } from '../../../src/api-types';
 import { UNRESOLVED_STATUSES } from '../../../src/domain/vocabulary';
 import { EmptyState, ErrorNote, Loading } from '../components/Feedback';
 import { EDGE_FAMILIES } from '../graph/edgeStyle';
 import { IdeaMap } from '../graph/IdeaMap';
+import { newlyArrived } from '../graph/stable';
 import { useOpenItem, useSelectedItemId } from '../itemNavigation';
 import { useGraph } from '../queries';
 
@@ -83,10 +84,55 @@ function Legend() {
   );
 }
 
+const HIGHLIGHT_MS = 3_000;
+const NO_FRESH: ReadonlySet<string> = new Set();
+
+/**
+ * Ids of items that arrived while this map was open, for a few seconds each. Tracked on the
+ * unfiltered graph, so toggling a filter never makes old items look new.
+ */
+function useFreshItemIds(graph: GraphDto | undefined): ReadonlySet<string> {
+  const known = useRef<Set<string> | null>(null);
+  const timers = useRef(new Set<ReturnType<typeof setTimeout>>());
+  const [fresh, setFresh] = useState<ReadonlySet<string>>(NO_FRESH);
+
+  useEffect(() => {
+    if (!graph) return;
+    const ids = graph.nodes.map((node) => node.id);
+    const added = newlyArrived(known.current, ids);
+    known.current = new Set(ids);
+    if (added.length === 0) return;
+    setFresh((current) => new Set([...current, ...added]));
+    const pending = timers.current;
+    const timer = setTimeout(() => {
+      pending.delete(timer);
+      setFresh((current) => {
+        const next = new Set(current);
+        for (const id of added) next.delete(id);
+        return next.size === 0 ? NO_FRESH : next;
+      });
+    }, HIGHLIGHT_MS);
+    pending.add(timer);
+  }, [graph]);
+
+  useEffect(() => {
+    const pending = timers.current;
+    return () => {
+      for (const timer of pending) clearTimeout(timer);
+      pending.clear();
+    };
+  }, []);
+  return fresh;
+}
+
 export function MapTab({ idea }: { idea: IdeaDto }) {
   const graph = useGraph(idea.id);
   const openItem = useOpenItem();
   const selectedId = useSelectedItemId();
+  const freshIds = useFreshItemIds(graph.data);
+  // On a phone the canvas gets the screen: legend and filters wait behind a toggle (the
+  // stylesheet always shows them on wide screens, where the toggle itself is hidden).
+  const [optionsOpen, setOptionsOpen] = useState(false);
   const [filters, setFilters] = useState<MapFilters>({
     hideRejected: false,
     hideEvidence: false,
@@ -98,39 +144,53 @@ export function MapTab({ idea }: { idea: IdeaDto }) {
     [graph.data, filters],
   );
 
-  if (graph.isPending) return <Loading />;
-  if (graph.error) return <ErrorNote error={graph.error} />;
-  if (!filtered) return null;
+  // A failed background refresh keeps the map on screen.
+  if (!graph.data || !filtered)
+    return graph.error ? <ErrorNote error={graph.error} /> : <Loading />;
 
+  const activeFilters = Object.values(filters).filter(Boolean).length;
   return (
-    <div className="map-tab">
+    <div className={optionsOpen ? 'map-tab options-open' : 'map-tab'}>
       <div className="map-toolbar">
-        {(Object.keys(FILTER_LABELS) as Array<keyof MapFilters>).map((key) => (
-          <label key={key} className="check">
-            <input
-              type="checkbox"
-              checked={filters[key]}
-              onChange={(e) => setFilters((current) => ({ ...current, [key]: e.target.checked }))}
-            />
-            {FILTER_LABELS[key]}
-          </label>
-        ))}
-        <span className="muted">
-          {filtered.nodes.length} of {graph.data.nodes.length} items · arrows point the way each
-          relation reads
+        <button
+          type="button"
+          className="map-options-toggle"
+          aria-expanded={optionsOpen}
+          onClick={() => setOptionsOpen((open) => !open)}
+        >
+          Legend / Filters{activeFilters > 0 ? ` (${activeFilters} on)` : ''}
+        </button>
+        <div className="map-filters">
+          {(Object.keys(FILTER_LABELS) as Array<keyof MapFilters>).map((key) => (
+            <label key={key} className="check">
+              <input
+                type="checkbox"
+                checked={filters[key]}
+                onChange={(e) => setFilters((current) => ({ ...current, [key]: e.target.checked }))}
+              />
+              {FILTER_LABELS[key]}
+            </label>
+          ))}
+        </div>
+        <span className="muted map-count">
+          {filtered.nodes.length} of {graph.data.nodes.length} items
+          <span className="map-count-long"> · arrows point the way each relation reads</span>
         </span>
       </div>
-      {filtered.nodes.length <= 1 && graph.data.nodes.length <= 1 ? (
+      {graph.data.nodes.length <= 1 ? (
         <EmptyState title="The map has only your original idea so far">
-          Run the analysis from the Overview tab to grow it.
+          It grows as the idea is analysed — from the Overview tab, or by your coding agent. New
+          items appear here on their own.
         </EmptyState>
       ) : (
         <div className="map-canvas">
           <IdeaMap
-            key={JSON.stringify(filters)}
+            key={idea.id}
             graph={filtered}
             selectedId={selectedId}
             onSelect={openItem}
+            freshIds={freshIds}
+            refitKey={JSON.stringify(filters)}
           />
         </div>
       )}

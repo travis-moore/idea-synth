@@ -24,18 +24,20 @@ function knownItems(detail: ItemDetailDto): ItemLookup {
 /** The "Idea Detail / Discussion" view. Used inside the drawer and as a full page. */
 export function ItemPanel({ itemId }: { itemId: string }) {
   const detail = useItem(itemId);
-  if (detail.isPending) return <Loading />;
-  if (detail.error) return <ErrorNote error={detail.error} />;
-
+  // Live refreshes happen while the user may be typing in this panel: a failed background
+  // refetch must never replace the forms, so an error only shows when there is no data.
   const data = detail.data;
+  if (!data) return detail.error ? <ErrorNote error={detail.error} /> : <Loading />;
   const { item } = data;
   const items = knownItems(data);
   const caption = ORIGIN_CAPTIONS[item.origin];
 
   return (
     <article className={`item-panel origin-${item.origin}`}>
-      <header className="item-panel-header">
+      <div className="item-panel-badges">
         <ItemBadges item={item} />
+      </div>
+      <header className="item-panel-header">
         <p className={`item-panel-text status-${item.status}`}>{item.text}</p>
         {caption && <p className="origin-caption">{caption}</p>}
         {item.status === 'needs_user' && item.attentionReason && (

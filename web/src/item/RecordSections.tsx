@@ -59,6 +59,12 @@ export function DecisionHistory({
             </span>
             <time className="muted">{formatTime(decision.createdAt)}</time>
           </div>
+          {decision.relayedBy && (
+            <p className="relayed-note">
+              Relayed by {decision.relayedBy}
+              {decision.userInstruction ? <> — you said: “{decision.userInstruction}”</> : null}
+            </p>
+          )}
           {decision.qualification && (
             <p className="record-text">Qualification: {decision.qualification}</p>
           )}

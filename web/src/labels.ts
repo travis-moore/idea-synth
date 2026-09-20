@@ -2,6 +2,7 @@
  * Human-readable labels for the controlled vocabulary (src/domain/vocabulary.ts).
  * Every Record is keyed by the domain type, so adding a value there is a compile error here.
  */
+import type { JobDto } from '../../src/api-types';
 import type { Adequacy, PremiseStance } from '../../src/domain/scaffolding';
 import type {
   Actor,
@@ -177,6 +178,57 @@ export const CONFIDENCE_TONES: Record<'tentative' | 'moderate' | 'firm', Tone> =
   moderate: 'warn',
   firm: 'good',
 };
+
+export const JOB_KIND_LABELS: Record<JobDto['kind'], string> = {
+  analyze: 'Analysis (Steps 2–5)',
+  synthesize: 'Synthesis (Steps 6–8)',
+  discuss_reply: 'AI reply on an item',
+  guided_turn: 'Guided tutor turn',
+  guided_handoff: 'Hand-off to synthesis',
+};
+
+export const JOB_STATUS_LABELS: Record<JobDto['status'], string> = {
+  queued: 'Queued',
+  running: 'Running',
+  completed: 'Completed',
+  failed: 'Failed',
+  cancelled: 'Cancelled',
+  interrupted: 'Interrupted',
+};
+
+/** Shown wherever a control that would start web reasoning is unavailable. */
+export const VIEWER_MODE_HINT =
+  'Viewer mode: reasoning runs in your VS Code agent through the synth CLI, not from this page.';
+
+/** How a run's model identity was established, in words. Unknown values are shown as they are. */
+export function describeModelSource(source: string | null): string | null {
+  if (!source) return null;
+  const known: Record<string, string> = {
+    provider: 'model reported by provider',
+    cli_reported: 'model reported by the CLI',
+    self_reported: 'model self-reported',
+  };
+  return known[source] ?? source.replace(/_/g, ' ');
+}
+
+/** How the producing model was authenticated. Never a secret; "none" (the mock) is not shown. */
+export function describeAuthMode(authMode: string | null): string | null {
+  if (!authMode || authMode === 'none') return null;
+  if (authMode === 'external_session') return 'external session';
+  if (authMode === 'api_key') return 'API key';
+  return authMode;
+}
+
+/** Who executed an operation, e.g. "you (web)" or "via claude-code (cli)". */
+export function describeOperation(operation: {
+  client: string;
+  executedBy: Actor;
+  agentName: string | null;
+}): string {
+  if (operation.executedBy === 'user' && !operation.agentName) return `you (${operation.client})`;
+  const who = operation.agentName ?? (operation.executedBy === 'agent' ? 'agent' : 'system');
+  return `via ${who} (${operation.client})`;
+}
 
 export function truncate(text: string, max: number): string {
   const flat = text.replace(/\s+/g, ' ').trim();

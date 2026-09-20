@@ -4,33 +4,54 @@ import { api } from '../api';
 import { ErrorNote } from '../components/Feedback';
 import { SynthesizeControl } from '../components/SynthesizeControl';
 import { itemInIdeaPath } from '../itemNavigation';
-import { truncate } from '../labels';
-import { useAction } from '../queries';
+import { VIEWER_MODE_HINT, truncate } from '../labels';
+import { isActiveJob, useAction, useCanReason, useJobs, useViewerMode } from '../queries';
 
 interface OverviewTabProps {
   idea: IdeaDto;
-  onSelectTab: (tab: 'review' | 'synthesis') => void;
+  onSelectTab: (tab: 'review' | 'synthesis' | 'map') => void;
 }
 
-function AnalyzeAction({ idea, onSelectTab }: OverviewTabProps) {
-  const analyze = useAction(api.analyze, () => onSelectTab('review'));
+function AnalyzeAction({ idea }: OverviewTabProps) {
+  const canReason = useCanReason();
+  const viewer = useViewerMode();
+  const jobs = useJobs(idea.id);
+  const analyze = useAction(api.analyze);
+  const active = jobs.data?.find((job) => job.kind === 'analyze' && isActiveJob(job));
   return (
     <div className="panel next-action">
-      <h2>Next: let the AI map your reasoning</h2>
+      <h2>Next: map your reasoning</h2>
       <p>
         Four passes extract your claims, explore branches, fact-check and raise objections. Nothing
         is decided for you: everything lands in the Review tab for your judgement.
       </p>
-      <div className="form-actions">
-        <button
-          type="button"
-          className="primary"
-          disabled={analyze.isPending}
-          onClick={() => analyze.mutate(idea.id)}
-        >
-          {analyze.isPending ? 'Running analysis…' : 'Run analysis (Steps 2–5)'}
-        </button>
-      </div>
+      {canReason ? (
+        <>
+          <div className="form-actions">
+            <button
+              type="button"
+              className="primary"
+              disabled={analyze.isPending || active !== undefined}
+              onClick={() => analyze.mutate(idea.id)}
+            >
+              {active
+                ? `Analysis ${active.status === 'queued' ? 'queued' : 'running'}…`
+                : 'Queue analysis (Steps 2–5)'}
+            </button>
+          </div>
+          <p className="hint">
+            It runs in the background: you can leave this page, and the map fills in as each pass
+            lands.
+          </p>
+        </>
+      ) : (
+        viewer && (
+          <p className="viewer-note">
+            {VIEWER_MODE_HINT} Ask your agent to analyse this idea; the map will fill in here as it
+            works.
+          </p>
+        )
+      )}
       <ErrorNote error={analyze.error} />
     </div>
   );
@@ -55,12 +76,11 @@ function ReviewGateAction({ idea, onSelectTab }: OverviewTabProps) {
         <button type="button" onClick={() => onSelectTab('review')}>
           Go to review
         </button>
+        <button type="button" onClick={() => onSelectTab('map')}>
+          Open the map
+        </button>
       </div>
-      <SynthesizeControl
-        idea={idea}
-        label="Build synthesis (Steps 6–8)"
-        onDone={() => onSelectTab('synthesis')}
-      />
+      <SynthesizeControl idea={idea} label="Queue synthesis (Steps 6–8)" />
     </div>
   );
 }
@@ -78,11 +98,7 @@ function SynthesizedAction({ idea, onSelectTab }: OverviewTabProps) {
           Open synthesis
         </button>
       </div>
-      <SynthesizeControl
-        idea={idea}
-        label="Re-run synthesis"
-        onDone={() => onSelectTab('synthesis')}
-      />
+      <SynthesizeControl idea={idea} label="Queue a new synthesis" />
     </div>
   );
 }
