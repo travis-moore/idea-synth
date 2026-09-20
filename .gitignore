@@ -10,7 +10,6 @@ coverage/
 .env.*
 !.env.example
 *.pat
-/.devops.json
 
 # Local databases (may contain private ideas)
 data/*

@@ -1,0 +1,89 @@
+# Idea Synth
+
+**Develop an idea without outsourcing the thinking.**
+
+> AI should scaffold reasoning rather than silently do the reasoning for the user.
+
+Idea Synth takes an intuition written in your own words and helps you work out what is in
+it: what you are actually claiming, what follows from it, what is factually shaky, what the
+strongest objections are, which tangents are worth keeping — and then it **hands each of
+those back to you** to discuss and decide on before anything is synthesised. The result is
+a reasoned position whose whole history stays inspectable: which thoughts were yours, which
+were the AI's, what changed and why.
+
+A mistaken premise does not kill a good idea that grew out of it. _"Building pyramids
+caused Egyptian progress"_ may not survive scrutiny, but _"can large collective projects
+accelerate learning even when their product is useless?"_ can. Idea Synth keeps both, and
+shows the link: **false premise, productive idea**.
+
+Two rules drive the design:
+
+- **Generate freely, evaluate explicitly, preserve provenance.**
+- **Being wrong should be cheap, but believing something without examining it should be visible.**
+
+## Quick start
+
+```bash
+npm install        # Node >= 20.19
+npm run dev        # http://localhost:5173
+```
+
+No API key needed. The default AI provider is a deterministic mock, and the database is
+seeded with a demo idea (the pyramids example) and a guided session (the "robots mean
+nobody has to work" hypothesis). See [docs/development.md](docs/development.md) for a
+five-minute tour and for switching to a live model.
+
+## What it does
+
+**Idea Synthesis** — eight stages around a human review gate:
+
+```
+1 Capture (you) → 2 Extract → 3 Explore → 4 Fact-check → 5 Skeptic
+      → YOUR REVIEW: discuss · accept · qualify · reject · split · branch · tangent
+      → 6 Builder → 7 Synthesis → 8 Tangent archive
+```
+
+The Explorer always runs before the Skeptic, so criticism cannot kill a branch before it
+has been captured. Details: [docs/workflow.md](docs/workflow.md).
+
+**Guided Idea Development** — for a half-formed hypothesis. The agent asks rather than
+answers, and raises its level of help (open question → narrower question → structure and
+background → options → an explicitly AI-supplied premise you may accept, reject or change)
+only when you are stuck. Details: [docs/guided-development.md](docs/guided-development.md).
+
+**Views** — Inbox / Needs Attention · Open Questions · Tangent Library · Idea Map (graph)
+· Item detail with discussion, provenance, evidence, revisions and full history · Synthesis
+with every line traced to its sources.
+
+## How it is built
+
+A modular monolith in TypeScript: Hono API, SQLite through Kysely, React + React Flow,
+Vitest. History tables are append-only and the captured idea and item authorship are
+immutable **at the database level** (triggers). All AI output is schema-validated before
+anything is written, and the model provider is pluggable (mock and Anthropic included).
+
+| Read                                                     | For                                                    |
+| -------------------------------------------------------- | ------------------------------------------------------ |
+| [docs/architecture.md](docs/architecture.md)             | Layers, request lifecycle, configuration               |
+| [docs/adr/0001-stack.md](docs/adr/0001-stack.md)         | Why this stack; the PostgreSQL path                    |
+| [docs/domain-model.md](docs/domain-model.md)             | Entities, authorship, relation types, provenance model |
+| [docs/workflow.md](docs/workflow.md)                     | The eight stages, review gate, lifecycle diagram       |
+| [docs/guided-development.md](docs/guided-development.md) | Adaptive scaffolding                                   |
+| [docs/ai-providers.md](docs/ai-providers.md)             | Provider abstraction, passes, validation, mock vs live |
+| [docs/development.md](docs/development.md)               | Setup, commands, migrations, testing                   |
+| [docs/roadmap.md](docs/roadmap.md)                       | Known gaps and next steps                              |
+
+## Working on this repository
+
+```bash
+npm run check      # format + lint + typecheck + tests
+```
+
+Coding agents (Claude Code, Codex, others): read [`.claude/CLAUDE.md`](.claude/CLAUDE.md)
+first. It is the single source of instructions; `AGENTS.md` only points to it.
+
+## Status
+
+Early, single-user, local-first. No authentication. The live Anthropic provider is
+implemented and unit-tested with a faked client but has not yet been run against the real
+API. The demo content illustrates the workflow; it does not assert historical facts.
