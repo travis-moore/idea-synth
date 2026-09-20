@@ -20,7 +20,7 @@ import { newId } from '../domain/ids';
 import type { Actor } from '../domain/vocabulary';
 
 /** Version of the JSON contracts the CLI / agent API speaks. Recorded on every operation. */
-export const CONTRACT_VERSION = '2026-09-21.1';
+export const CONTRACT_VERSION = '2026-09-22.1';
 
 export type ClientKind = 'web' | 'cli' | 'worker' | 'seed' | 'system';
 

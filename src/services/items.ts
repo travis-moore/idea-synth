@@ -24,7 +24,7 @@ import {
 import type { AppContext } from './context';
 import { captureIdea } from './ideas';
 import { currentOperation, requireUserAuthority, StaleInputError } from './operation';
-import { executePass } from './pipeline';
+import { executePass, type PassOptions } from './pipeline';
 import { buildSnapshot } from './queries';
 import {
   addRevision,
@@ -377,6 +377,7 @@ export async function attachEvidence(
       kind: 'evidence',
       origin: originOf(author),
       text: input.text,
+      verbatim: author === 'user', // the user's wording is kept exactly
       via: 'evidence',
     });
     await trx
@@ -385,7 +386,8 @@ export async function attachEvidence(
         item_id: evidence.id,
         source_title: input.sourceTitle.trim(),
         url: input.url?.trim() || null,
-        excerpt: input.excerpt?.trim() || null,
+        // An excerpt is a quotation: kept exactly as given.
+        excerpt: input.excerpt?.trim() ? input.excerpt : null,
         created_at: nowIso(),
       })
       .execute();
@@ -418,16 +420,37 @@ export async function attachEvidence(
 export function postContribution(
   db: DbOrTrx,
   itemId: string,
-  input: { author: Author; body: string },
+  input: {
+    author: Author;
+    body: string;
+    /**
+     * The last message `seq` the writer had read (0 for an empty thread). Given for every
+     * agent reply: if the thread has moved on, the reply never saw the newest message and
+     * is refused, exactly like a provider-generated reply.
+     */
+    expectedThreadSeq?: number | undefined;
+  },
 ) {
-  return inTransaction(db, (trx) => postMessage(trx, { itemId, ...input }));
+  return inTransaction(db, async (trx) => {
+    if (input.expectedThreadSeq !== undefined) {
+      const latest = await trx
+        .selectFrom('discussion_messages')
+        .select((eb) => eb.fn.max('seq').as('seq'))
+        .where('item_id', '=', itemId)
+        .executeTakeFirst();
+      const actual = latest?.seq ?? 0;
+      if (actual !== input.expectedThreadSeq)
+        throw new StaleInputError(input.expectedThreadSeq, actual, 'The discussion thread');
+    }
+    return postMessage(trx, { itemId, author: input.author, body: input.body });
+  });
 }
 
 /** Ask the configured provider to reply in an item's thread. */
 export async function requestAgentReply(
   ctx: AppContext,
   itemId: string,
-  options: { signal?: AbortSignal | undefined } = {},
+  options: Pick<PassOptions, 'signal' | 'checkpoint'> = {},
 ): Promise<void> {
   const item = await requireItem(ctx.db, itemId);
   const snapshot = await buildSnapshot(ctx.db, item.idea_id);
@@ -463,7 +486,12 @@ export async function requestAgentReply(
     },
     // A reply is bound to its THREAD (checked above), not to the whole idea: an unrelated
     // decision elsewhere does not invalidate it. The idea version it saw is still recorded.
-    { readVersion: snapshot.inputVersion, checkVersion: false, signal: options.signal },
+    {
+      readVersion: snapshot.inputVersion,
+      checkVersion: false,
+      signal: options.signal,
+      checkpoint: options.checkpoint,
+    },
   );
 }
 

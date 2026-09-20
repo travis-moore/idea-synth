@@ -26,6 +26,10 @@ import type {
 
 export const nowIso = () => new Date().toISOString();
 
+/** Free text that accompanies a record. Blank becomes null; the user's words are kept exactly. */
+const exactOrNull = (value: string | null | undefined, author: Author): string | null =>
+  value?.trim() ? (author === 'user' ? value : value.trim()) : null;
+
 /** Run `fn` in a transaction, joining the current one if there is one. */
 export function inTransaction<T>(db: DbOrTrx, fn: (trx: Transaction<Database>) => Promise<T>) {
   return db.isTransaction ? fn(db as Transaction<Database>) : (db as Db).transaction().execute(fn);
@@ -280,8 +284,8 @@ export async function recordDecision(db: DbOrTrx, input: DecisionInput): Promise
       author: input.author,
       from_status: item.status,
       to_status: toStatus,
-      rationale: input.rationale?.trim() || null,
-      qualification: input.qualification?.trim() || null,
+      rationale: exactOrNull(input.rationale, input.author),
+      qualification: exactOrNull(input.qualification, input.author),
       related_item_ids: JSON.stringify(input.relatedItemIds ?? []),
       created_at: now,
       relayed_by: authority.relayedBy,
@@ -354,7 +358,7 @@ export async function addRevision(db: DbOrTrx, input: RevisionInput): Promise<nu
       seq,
       text,
       author: input.author,
-      reason: input.reason?.trim() || null,
+      reason: exactOrNull(input.reason, input.author),
       caused_by_item_id: input.causedByItemId ?? null,
       run_id: input.runId ?? null,
       created_at: now,

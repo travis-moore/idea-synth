@@ -73,7 +73,10 @@ These are product rules, enforced by the application where possible.
    idea, a JSON Schema and an `inputVersion`. Produce the JSON yourself and send it with
    `passes.submit`. Output that fails the schema, references unknown items, uses kinds or
    edge types outside the pass's remit, or skips the pass order is refused whole.
-5. **Stale work is refused.** Always echo the `inputVersion` you were given. If the idea
+5. **Stale work is refused.** Always echo the `inputVersion` **and `promptVersion`** you were
+   given: together they bind your output to exactly the context you were served, which the
+   application re-creates and stores on the run when it commits (so the history shows what
+   you were given, not just what you answered). If the idea
    changed meanwhile (the user decided something in the web UI, another agent wrote), you
    get `details.reason = "stale_input"`: call `passes.next` again and redo the reasoning
    against the new state. Your stale output is kept as history but never published.
@@ -90,8 +93,12 @@ These are product rules, enforced by the application where possible.
 8. **Explorer before Skeptic; scaffold before answering.** The pass order is enforced. In
    guided mode the scaffolding level is chosen by code; produce the move at the level you
    are given.
-9. Never write to the SQLite file directly, and never edit this repository while merely
-   using the tool.
+9. **Replies are bound to the thread you read.** An `items.discuss` with
+   `author: "agent"` must pass `expectedThreadSeq`: the `seq` of the last message you read
+   (`items.get`; 0 for an empty thread). If the user has posted since, the reply is refused
+   as stale: re-read and answer what they actually said last.
+10. Never write to the SQLite file directly, and never edit this repository while merely
+    using the tool.
 
 ## The CLI
 
@@ -134,12 +141,12 @@ synth ideas.capture --input /tmp/idea.json $S --request-id cap-7f3a91c2     # ->
 synth passes.next '{"ideaId":"idea_…"}'          # instructions + input + outputSchema + inputVersion
 #    ... reason in your own conversation, write the JSON ...
 synth passes.submit --input /tmp/extract.json $S --request-id ext-51c0de77
-#    {"ideaId","pass":"extract","inputVersion":<from passes.next>,"output":{...}}
+#    {"ideaId","pass":"extract","inputVersion":<n>,"promptVersion":"<from passes.next>","output":{...}}
 
 # Review gate: discuss the needsUser items WITH THE USER, in the chat.
 synth ideas.context '{"ideaId":"idea_…"}'        # needsUser, gate, next
 synth items.discuss --input /tmp/their-reply.json $S --request-id msg-…   # author:"user", verbatim
-synth items.discuss --input /tmp/my-reply.json   $S --request-id msg-…   # author:"agent"
+synth items.discuss --input /tmp/my-reply.json   $S --request-id msg-…   # author:"agent", expectedThreadSeq
 synth items.decide '{"itemId":"itm_…","decision":"qualify","qualification":"only where skills transfer"}' \
       $S --request-id dec-… --user-instruction "ok accept that but only where the skills transfer"
 

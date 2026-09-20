@@ -64,6 +64,12 @@ export interface PassOptions {
   override?: GateOverride | undefined;
   signal?: AbortSignal | undefined;
   onProgress?: ((message: string) => void | Promise<void>) | undefined;
+  /**
+   * Called before each pass starts, and again INSIDE the commit transaction just before a
+   * result is applied. Throwing stops the run: nothing further is applied, and what was
+   * already committed stays. This is how a cancelled job is guaranteed not to keep writing.
+   */
+  checkpoint?: ((db: Db | Trx) => Promise<void>) | undefined;
   /** Envelope for the operations this run performs. Defaults to a system worker. */
   meta?: Partial<OperationMeta> | undefined;
 }
@@ -82,7 +88,23 @@ const labelOf = (request: { pass: Pass; task: string }) =>
 
 export interface CommitArgs<T> {
   ideaId: string;
-  request: Pick<StructuredRequest<T>, 'pass' | 'task' | 'promptVersion' | 'input' | 'schema'>;
+  request: Pick<StructuredRequest<T>, 'pass' | 'task' | 'promptVersion' | 'input' | 'schema'> &
+    Partial<Pick<StructuredRequest<T>, 'system' | 'prompt'>>;
+  /**
+   * Set when the reasoner was an external agent that was SERVED its context earlier (by
+   * `passes.next` / `guided.next`). We were not there when it read it, so the context is
+   * rebuilt inside the commit transaction, where the input-version check has just proved
+   * the idea is exactly as it was served. That rebuilt context is what the run records.
+   */
+  served?:
+    | {
+        /** The prompt version the agent says it was given. Must be the current one. */
+        promptVersion: string;
+        rebuild: (
+          db: Db | Trx,
+        ) => Promise<Pick<StructuredRequest<unknown>, 'input' | 'system' | 'prompt'>>;
+      }
+    | undefined;
   /** Unvalidated output, from whatever reasoner produced it. */
   raw: unknown;
   producer: Producer;
@@ -109,8 +131,21 @@ export interface Committed<R> {
 }
 
 type RunArgs = Omit<CommitArgs<unknown>, 'raw' | 'request'> & {
-  request: Pick<StructuredRequest<unknown>, 'pass' | 'task' | 'promptVersion' | 'input'>;
+  request: Pick<StructuredRequest<unknown>, 'pass' | 'task' | 'promptVersion' | 'input'> &
+    Partial<Pick<StructuredRequest<unknown>, 'system' | 'prompt'>>;
 };
+
+/** Everything the reasoner was given: structured input, rendered prompt and instructions. */
+const contextJson = (
+  task: string,
+  context: Partial<Pick<StructuredRequest<unknown>, 'input' | 'system' | 'prompt'>>,
+) =>
+  JSON.stringify({
+    task,
+    input: context.input ?? null,
+    prompt: context.prompt ?? null,
+    instructions: context.system ?? null,
+  });
 
 function runRecord(args: RunArgs) {
   return {
@@ -121,7 +156,7 @@ function runRecord(args: RunArgs) {
     model_source: args.producer.modelSource,
     auth_mode: args.producer.authMode,
     prompt_version: args.request.promptVersion,
-    input_json: JSON.stringify({ task: args.request.task, input: args.request.input }),
+    input_json: contextJson(args.request.task, args.request),
     input_version: args.readVersion,
     started_at: args.startedAt ?? nowIso(),
   };
@@ -137,10 +172,26 @@ async function recordUnappliedRun(
 ): Promise<void> {
   const runId = newId('run');
   await db.transaction().execute(async (trx) => {
+    // For an external agent's attempt, the served context can only be reconstructed while
+    // the idea is still at the version it was served at. Otherwise say so, honestly.
+    let inputJson = runRecord(args).input_json;
+    if (args.served) {
+      const idea = await requireIdea(trx, args.ideaId);
+      inputJson =
+        Number(idea.revision) === args.readVersion
+          ? contextJson(args.request.task, await args.served.rebuild(trx))
+          : JSON.stringify({
+              task: args.request.task,
+              note: 'The context served to the external agent could not be reconstructed: the idea has changed since.',
+              servedAtInputVersion: args.readVersion,
+              servedPromptVersion: args.served.promptVersion,
+            });
+    }
     await trx
       .insertInto('analysis_runs')
       .values({
         ...runRecord(args),
+        input_json: inputJson,
         id: runId,
         status,
         output_json: output === undefined ? null : JSON.stringify(output),
@@ -252,12 +303,22 @@ export async function commitPass<T, R>(
         },
       },
       async (trx) => {
+        let inputJson = runBase.input_json;
+        if (args.served) {
+          if (args.served.promptVersion !== request.promptVersion)
+            throw conflict(
+              `This was prepared for prompt version "${args.served.promptVersion}", but the current one is "${request.promptVersion}". Get the contract again and redo the reasoning.`,
+            );
+          // The version check above this callback has passed: the idea is exactly as served.
+          inputJson = contextJson(request.task, await args.served.rebuild(trx));
+        }
         await args.guard?.(trx);
         const runId = newId('run');
         await trx
           .insertInto('analysis_runs')
           .values({
             ...runBase,
+            input_json: inputJson,
             id: runId,
             status: 'completed',
             output_json: JSON.stringify(output),
@@ -311,8 +372,10 @@ export async function executePass<T, R>(
     checkVersion?: boolean;
     signal?: AbortSignal | undefined;
     meta?: Partial<OperationMeta> | undefined;
+    checkpoint?: PassOptions['checkpoint'];
   },
 ): Promise<R> {
+  await options.checkpoint?.(ctx.db);
   const startedAt = nowIso();
   const info = ctx.provider.info();
   const commitArgs = {
@@ -321,6 +384,7 @@ export async function executePass<T, R>(
     producer: info,
     readVersion: options.readVersion,
     checkVersion: options.checkVersion ?? true,
+    guard: options.checkpoint,
     startedAt,
     meta: {
       client: 'worker',
@@ -409,11 +473,17 @@ export async function commitWorkflowPass(
   raw: unknown,
   producer: Producer,
   meta: OperationMeta,
-  options: { override?: GateOverride | undefined } = {},
+  options: {
+    override?: GateOverride | undefined;
+    /** External submissions only: the prompt version the agent was served. */
+    servedPromptVersion?: string | undefined;
+    checkpoint?: PassOptions['checkpoint'];
+  } = {},
 ): Promise<Committed<unknown>> {
   const { ideaId, pass } = prepared;
-  // The request is rebuilt only for its schema and prompt version when the caller is
-  // external; the input recorded on the run is what THEY were given at `inputVersion`.
+  // An external caller was served its context earlier; here we only need the schema and the
+  // current prompt version. What it was actually given is rebuilt inside the commit.
+  const external = prepared.request === undefined;
   const request =
     prepared.request ??
     (analysisRequests[pass]({
@@ -422,15 +492,9 @@ export async function commitWorkflowPass(
       relations: [],
       inputVersion: prepared.inputVersion,
     }) as StructuredRequest<unknown>);
-  const recorded = prepared.request
-    ? request
-    : {
-        ...request,
-        input: {
-          note: 'input was served to an external agent',
-          inputVersion: prepared.inputVersion,
-        },
-      };
+  const recorded = external
+    ? { ...request, input: null, prompt: undefined, system: undefined }
+    : request;
 
   return commitPass(
     db,
@@ -442,7 +506,14 @@ export async function commitWorkflowPass(
       readVersion: prepared.inputVersion,
       checkVersion: true,
       meta,
+      served: external
+        ? {
+            promptVersion: options.servedPromptVersion ?? '(not stated)',
+            rebuild: async (at) => analysisRequests[pass](await buildSnapshot(at, ideaId)),
+          }
+        : undefined,
       guard: async (trx) => {
+        await options.checkpoint?.(trx);
         await assertLegal(trx, ideaId, pass);
         if ((await requireIdea(trx, ideaId)).stage === 'guided')
           await guardGuidedHandoff(trx, ideaId);
@@ -527,6 +598,7 @@ async function withIdeaLock<T>(ideaId: string, fn: () => Promise<T>): Promise<T>
 
 async function runPass(ctx: AppContext, ideaId: string, pass: WorkflowPass, options: PassOptions) {
   options.signal?.throwIfAborted();
+  await options.checkpoint?.(ctx.db);
   await options.onProgress?.(`Running ${pass}`);
   const prepared = await preparePass(ctx.db, ideaId, pass, options);
   const startedAt = nowIso();

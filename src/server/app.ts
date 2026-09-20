@@ -61,7 +61,8 @@ const STATUS: Record<DomainErrorCode, 400 | 403 | 404 | 409 | 502> = {
 };
 
 const text = z.string().trim().min(1).max(20000);
-const optionalText = z.string().trim().max(20000).optional();
+/** Optional user-typed text: stored exactly (blank is treated as absent by the services). */
+const optionalText = z.string().max(20000).optional();
 /** User-typed content that must be stored exactly: validated for emptiness, never trimmed. */
 const verbatim = z
   .string()
@@ -99,7 +100,7 @@ const bodies = {
   }),
   revise: z.object({ text: verbatim, reason: optionalText, causedByItemId: z.string().optional() }),
   evidence: z.object({
-    text,
+    text: verbatim,
     stance: z.enum(['for', 'against']),
     sourceTitle: text,
     url: z.string().url().optional().or(z.literal('')),
@@ -250,7 +251,11 @@ export function createApp(ctx: AppContext, options: AppOptions) {
     ),
   );
   api.get('/jobs/:id', async (c) => c.json(await getJob(db, c.req.param('id'))));
-  api.post('/jobs/:id/cancel', async (c) => c.json(await requestCancel(db, c.req.param('id'))));
+  api.post('/jobs/:id/cancel', async (c) => {
+    const job = await requestCancel(db, c.req.param('id'));
+    options.runner?.abort(job.id); // stop the model call now; the flag stops any further writes
+    return c.json(job);
+  });
 
   // --- Views (one idea with ?ideaId=, or the whole workspace) ---------------------------
   api.get('/inbox', async (c) => c.json(await listInbox(db, c.req.query('ideaId'))));

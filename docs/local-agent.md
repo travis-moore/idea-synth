@@ -115,7 +115,9 @@ table (`queued → running → completed | failed | cancelled | interrupted`), e
 runner in the server process with bounded concurrency (`IDEA_SYNTH_JOB_CONCURRENCY`,
 default 2) and at most one running job per idea. Your own input (a message, a guided
 answer, a decision) is committed **before** the job is queued, so closing the browser loses
-nothing. Jobs that were running when the server stopped are resumed on restart; every
+nothing. Cancelling aborts the model call at once (same process) and sets a flag that is checked
+before every pass and once more inside the transaction that would apply a result, so a
+cancelled job never commits anything further; what it had already committed stays. Jobs that were running when the server stopped are resumed on restart; every
 handler is resumable and every result is applied through the input-version check, so a
 resumed or duplicated job cannot apply the same reasoning twice or publish stale output.
 `jobs` is mutable operational state and is kept apart from the append-only reasoning

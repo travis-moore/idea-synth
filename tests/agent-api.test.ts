@@ -5,7 +5,12 @@
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { MockProvider, type StructuredRequest } from '../src/ai';
-import { analysisRequests, tutorAssessRequest, tutorMoveRequest } from '../src/ai/passes';
+import {
+  analysisRequests,
+  PROMPT_VERSION,
+  tutorAssessRequest,
+  tutorMoveRequest,
+} from '../src/ai/passes';
 import { runCommand } from '../src/agent-api/commands';
 import { openTestDb } from '../src/db/client';
 import type { Db } from '../src/db/schema';
@@ -58,6 +63,7 @@ async function submitNext(ideaId: string, extra: object = {}) {
     ideaId,
     pass: contract.pass,
     inputVersion: contract.inputVersion,
+    promptVersion: PROMPT_VERSION,
     output,
     ...((extra as { override?: object }).override
       ? { override: (extra as { override: object }).override }
@@ -153,6 +159,7 @@ describe('VS Code agent as a first-class client', () => {
       ideaId,
       pass: 'extract',
       inputVersion: contract.inputVersion,
+      promptVersion: PROMPT_VERSION,
       output,
     });
     const again = await run<{ replayed: boolean; applied: { created: object } }>('passes.submit', {
@@ -160,6 +167,7 @@ describe('VS Code agent as a first-class client', () => {
       ideaId,
       pass: 'extract',
       inputVersion: contract.inputVersion,
+      promptVersion: PROMPT_VERSION,
       output,
     });
     expect(first.replayed).toBe(false);
@@ -180,6 +188,7 @@ describe('VS Code agent as a first-class client', () => {
         ideaId,
         pass: 'explore',
         inputVersion: explore.inputVersion,
+        promptVersion: PROMPT_VERSION,
         output: exploreOutput,
       }),
     ).rejects.toMatchObject({ details: { reason: 'stale_input' } });
@@ -202,6 +211,7 @@ describe('VS Code agent as a first-class client', () => {
         ideaId,
         pass: 'extract',
         inputVersion: (await run<{ inputVersion: number }>('passes.next', { ideaId })).inputVersion,
+        promptVersion: PROMPT_VERSION,
         output,
       }),
     ).rejects.toThrow(/not the next pass/);
@@ -237,6 +247,7 @@ describe('VS Code agent as a first-class client', () => {
         ideaId: a,
         pass: 'explore',
         inputVersion: contract.inputVersion,
+        promptVersion: PROMPT_VERSION,
         output,
       }),
     ).rejects.toThrow(/unknown item/);
@@ -247,6 +258,7 @@ describe('VS Code agent as a first-class client', () => {
         ideaId: a,
         pass: 'explore',
         inputVersion: contract.inputVersion,
+        promptVersion: PROMPT_VERSION,
         output,
       }),
     ).rejects.toThrow(/unknown item/);
@@ -256,6 +268,7 @@ describe('VS Code agent as a first-class client', () => {
         ideaId: a,
         pass: 'explore',
         inputVersion: contract.inputVersion,
+        promptVersion: PROMPT_VERSION,
         output: 'some prose',
       }),
     ).rejects.toThrow(/rejected/);
@@ -348,6 +361,7 @@ describe('VS Code agent as a first-class client', () => {
       itemId: userChild!.item.id,
       author: 'agent',
       body: 'What would count as capacity here?',
+      expectedThreadSeq: 1,
     });
     expect(
       (await getItemDetail(db, userChild!.item.id)).messages.map((m) => [m.author, m.body]),
@@ -380,6 +394,7 @@ describe('VS Code agent as a first-class client', () => {
         ideaId,
         pass: 'builder',
         inputVersion: contract.inputVersion,
+        promptVersion: PROMPT_VERSION,
         output,
         override,
       }),
@@ -389,6 +404,7 @@ describe('VS Code agent as a first-class client', () => {
       ideaId,
       pass: 'builder',
       inputVersion: contract.inputVersion,
+      promptVersion: PROMPT_VERSION,
       output,
       override,
     });
@@ -424,6 +440,7 @@ describe('VS Code agent as a first-class client', () => {
         sessionId,
         task: task.task,
         inputVersion: task.inputVersion,
+        promptVersion: PROMPT_VERSION,
         output,
       });
     };
@@ -452,6 +469,7 @@ describe('VS Code agent as a first-class client', () => {
         sessionId,
         task: 'move',
         inputVersion: move.inputVersion,
+        promptVersion: PROMPT_VERSION,
         output: {
           question: 'Here.',
           supplied_premise: { text: 'Because I say so.', kind: 'assumption' },

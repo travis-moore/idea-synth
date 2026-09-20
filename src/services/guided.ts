@@ -273,7 +273,10 @@ export interface PreparedGuidedTask {
 }
 
 /** Build the request for whichever reasoning step the session is waiting for. */
-export async function prepareGuidedTask(db: Db, sessionId: string): Promise<PreparedGuidedTask> {
+export async function prepareGuidedTask(
+  db: DbOrTrx,
+  sessionId: string,
+): Promise<PreparedGuidedTask> {
   const session = await requireSession(db, sessionId);
   const idea = await requireIdea(db, session.idea_id); // read the version FIRST
   const steps = await listSteps(db, sessionId);
@@ -496,6 +499,7 @@ export function commitGuidedTask(
   raw: unknown,
   producer: Producer,
   meta: OperationMeta,
+  servedPromptVersion?: string,
 ): Promise<Committed<unknown>> {
   const template = (
     prepared.task === 'assessment'
@@ -509,9 +513,14 @@ export function commitGuidedTask(
           transcript: [],
         })
   ) as StructuredRequest<unknown>;
+  // An external agent was served its context by `guided.next`. What it was given is rebuilt
+  // inside the commit, where the version check has proved the session is as it was served.
+  const external = prepared.request === undefined;
   const request = prepared.request ?? {
     ...template,
-    input: { note: 'input was served to an external agent', inputVersion: prepared.inputVersion },
+    input: null,
+    prompt: undefined,
+    system: undefined,
   };
   return commitPass(
     db,
@@ -523,6 +532,20 @@ export function commitGuidedTask(
       readVersion: prepared.inputVersion,
       checkVersion: true,
       meta,
+      scope: prepared.sessionId,
+      served: external
+        ? {
+            promptVersion: servedPromptVersion ?? '(not stated)',
+            rebuild: async (at) => {
+              const again = await prepareGuidedTask(at, prepared.sessionId);
+              if (again.task !== prepared.task)
+                throw conflict(
+                  `The session is waiting for "${again.task}", not "${prepared.task}".`,
+                );
+              return again.request;
+            },
+          }
+        : undefined,
     },
     (trx, output, runId): Promise<unknown> =>
       prepared.task === 'assessment'
@@ -559,7 +582,12 @@ async function runTask(
       expected === 'assessment'
         ? applyAssessment(trx, sessionId, output as TutorAssessOutput, runId)
         : applyMove(trx, sessionId, output as TutorMoveOutput, runId),
-    { readVersion: prepared.inputVersion, signal: options.signal, meta: options.meta },
+    {
+      readVersion: prepared.inputVersion,
+      signal: options.signal,
+      meta: options.meta,
+      checkpoint: options.checkpoint,
+    },
   );
 }
 

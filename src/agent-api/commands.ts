@@ -319,10 +319,32 @@ export const commands = {
     description:
       'Append ONE contribution to an item\'s discussion thread. Post the user\'s words as author "user" (verbatim) and your own as author "agent", as separate calls. Nothing else is inferred from a message.',
     mutating: true,
-    input: z.object({ meta: metaSchema, itemId: z.string(), author, body: text }),
+    input: z
+      .object({
+        meta: metaSchema,
+        itemId: z.string(),
+        author,
+        body: text,
+        expectedThreadSeq: z
+          .number()
+          .int()
+          .nonnegative()
+          .optional()
+          .describe(
+            'REQUIRED for author "agent": the seq of the last message you read in this thread (0 if it was empty; see items.get). If someone has posted since, your reply is refused as stale: re-read the thread and write a reply that has seen it.',
+          ),
+      })
+      .refine((v) => v.author !== 'agent' || v.expectedThreadSeq !== undefined, {
+        message: 'expectedThreadSeq is required for an agent reply',
+        path: ['expectedThreadSeq'],
+      }),
     run: ({ db }, input) =>
       itemOp(db, 'items.discuss', input.itemId, input, undefined, (trx) =>
-        postContribution(trx, input.itemId, { author: input.author, body: input.body }),
+        postContribution(trx, input.itemId, {
+          author: input.author,
+          body: input.body,
+          expectedThreadSeq: input.expectedThreadSeq,
+        }),
       ),
   }),
 
@@ -367,6 +389,12 @@ export const commands = {
       ideaId: z.string(),
       pass: z.enum(WORKFLOW_PASSES as [string, ...string[]]),
       inputVersion,
+      promptVersion: z
+        .string()
+        .min(1)
+        .describe(
+          'The promptVersion returned with the contract. Binds your output to what you were given.',
+        ),
       output: z.unknown(),
       override: overrideSchema.optional(),
     }),
@@ -378,7 +406,10 @@ export const commands = {
         input.output,
         producerOf(input.meta),
         toOperationMeta(input.meta),
-        { override: gateOverride(input.meta, input.override) },
+        {
+          override: gateOverride(input.meta, input.override),
+          servedPromptVersion: input.promptVersion,
+        },
       );
       return {
         pass,
@@ -629,6 +660,12 @@ export const commands = {
       sessionId: z.string(),
       task: z.enum(['assessment', 'move']),
       inputVersion,
+      promptVersion: z
+        .string()
+        .min(1)
+        .describe(
+          'The promptVersion returned with the contract. Binds your output to what you were given.',
+        ),
       output: z.unknown(),
     }),
     run: async ({ db }, input) => {
@@ -644,6 +681,7 @@ export const commands = {
         input.output,
         producerOf(input.meta),
         toOperationMeta(input.meta),
+        input.promptVersion,
       );
       const after = await getGuidedSession(db, input.sessionId);
       return {

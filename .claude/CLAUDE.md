@@ -194,6 +194,12 @@ the same transaction.
 - A discussion reply is bound to the thread it read (max `seq`), a synthesize job to the
   synthesis version it was requested at: resumed or late work re-checks and becomes a no-op
   or a `stale` run. A gate override is recorded on every pass it lets through (Builder too).
+- A run records the context its reasoner was given. For an external agent that context is
+  rebuilt inside the commit transaction (the version check proves it is what was served)
+  and the submission must echo the `promptVersion`; never store a placeholder instead.
+- Cancellation is checked before each pass and again inside the commit transaction
+  (`PassOptions.checkpoint`), never left to a timer: a cancelled job must not keep writing.
+- An agent's discussion reply carries the thread `seq` it read, whoever the agent is.
 - Application-written text is never stored with `author: 'user'`, and read-only commands
   write nothing.
 - `jobs` is **mutable operational state**, not history. Never treat it as provenance and

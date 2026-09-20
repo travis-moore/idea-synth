@@ -274,6 +274,13 @@ export class JobRunner {
     void this.tick();
   }
 
+  /** Abort a job running in THIS process right away (the database flag covers the rest). */
+  abort(jobId: string): void {
+    this.active
+      .get(jobId)
+      ?.controller.abort(new ProviderError('Cancelled by the user.', { code: 'cancelled' }));
+  }
+
   /** Stop taking work and abort what is running (it will be resumed on the next start). */
   async stop(): Promise<void> {
     if (this.timer) clearInterval(this.timer);
@@ -394,6 +401,17 @@ export class JobRunner {
     const options: PassOptions = {
       signal: controller.signal,
       onProgress: async (message) => void (await set({ progress: message })),
+      // Not left to the heartbeat: asked before every pass, and once more inside the
+      // transaction that would apply a result, so a cancelled job cannot keep writing.
+      checkpoint: async (at) => {
+        const row = await at
+          .selectFrom('jobs')
+          .select('cancel_requested')
+          .where('id', '=', job.id)
+          .executeTakeFirst();
+        if (row && Number(row.cancel_requested) === 1)
+          throw new DomainError('conflict', 'Cancelled by the user.', { reason: 'cancelled' });
+      },
       meta: { client: 'worker', clientSession: job.id },
     };
     try {
@@ -410,8 +428,7 @@ export class JobRunner {
       const reason = controller.signal.aborted
         ? failureOf(controller.signal.reason)
         : failureOf(error);
-      const status: JobStatus =
-        reason.code === 'cancelled' ? 'cancelled' : reason.code === 'timeout' ? 'failed' : 'failed';
+      const status: JobStatus = reason.code === 'cancelled' ? 'cancelled' : 'failed';
       // A server shutdown is not a verdict on the job: leave it running so recover() resumes it.
       if (reason.message === 'Server shutting down.') return;
       await set({ status, error_code: reason.code, error: reason.message, finished_at: nowIso() });
