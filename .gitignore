@@ -1,0 +1,33 @@
+# Dependencies and build output
+node_modules/
+dist/
+web/dist/
+coverage/
+*.tsbuildinfo
+
+# Secrets: never commit. Ship .env.example instead.
+.env
+.env.*
+!.env.example
+*.pat
+/.devops.json
+
+# Local databases (may contain private ideas)
+data/*
+!data/.gitkeep
+*.sqlite
+*.sqlite-*
+*.db
+
+# Logs and OS/editor junk
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+*.swp
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# Claude Code local-only settings
+.claude/settings.local.json
