@@ -10,6 +10,7 @@ import { conflict, invalid, notFound } from '../domain/errors';
 import { newId } from '../domain/ids';
 import { locateQuote } from '../domain/quotes';
 import { statusAfterDecision, wouldCreateGenealogyCycle } from '../domain/rules';
+import { currentOperation, requireUserAuthority } from './operation';
 import type {
   Actor,
   AttentionReason,
@@ -39,10 +40,25 @@ export interface EventInput {
   runId?: string | null;
 }
 
+/** Bookkeeping about attempts. Everything else is a change to the reasoning state. */
+const NOT_A_STATE_CHANGE: readonly EventType[] = ['run.completed', 'run.failed', 'run.stale'];
+
+/**
+ * Append to the audit log. Any event that changes reasoning state also bumps the idea's
+ * input version (`ideas.revision`) in the same transaction, which is what lets results
+ * computed from an older state be recognised and refused.
+ */
 export async function logEvent(db: DbOrTrx, e: EventInput): Promise<void> {
+  if (e.ideaId && !NOT_A_STATE_CHANGE.includes(e.type))
+    await db
+      .updateTable('ideas')
+      .set((eb) => ({ revision: eb('revision', '+', 1) }))
+      .where('id', '=', e.ideaId)
+      .execute();
   await db
     .insertInto('events')
     .values({
+      operation_id: currentOperation()?.id ?? null,
       idea_id: e.ideaId,
       item_id: e.itemId ?? null,
       type: e.type,
@@ -241,6 +257,12 @@ export async function recordDecision(db: DbOrTrx, input: DecisionInput): Promise
     author: input.author,
     qualification: input.qualification,
   });
+  // A judgement call is always the user's. If an agent is the one executing it, it must
+  // be carrying the user's own instruction, which is kept next to the decision.
+  const authority =
+    input.author === 'user'
+      ? requireUserAuthority(`${input.type} an item`)
+      : { relayedBy: null, userInstruction: null };
   const last = await db
     .selectFrom('decisions')
     .select((eb) => eb.fn.max('seq').as('seq'))
@@ -262,6 +284,8 @@ export async function recordDecision(db: DbOrTrx, input: DecisionInput): Promise
       qualification: input.qualification?.trim() || null,
       related_item_ids: JSON.stringify(input.relatedItemIds ?? []),
       created_at: now,
+      relayed_by: authority.relayedBy,
+      user_instruction: authority.userInstruction,
     })
     .execute();
   await db
@@ -306,8 +330,8 @@ export async function addRevision(db: DbOrTrx, input: RevisionInput): Promise<nu
   const item = await requireItem(db, input.itemId);
   if (item.kind === 'original_idea')
     throw invalid('The original idea is permanent provenance and cannot be reworded.');
-  const text = input.text.trim();
-  if (!text) throw invalid('A revision needs some text.');
+  if (!input.text.trim()) throw invalid('A revision needs some text.');
+  const text = input.author === 'user' ? input.text : input.text.trim();
   if (text === item.text) throw conflict('The revision is identical to the current wording.');
   if (input.causedByItemId) {
     const cause = await requireItem(db, input.causedByItemId);
@@ -359,8 +383,9 @@ export async function postMessage(
   input: { itemId: string; author: Author; body: string; runId?: string | null },
 ): Promise<{ id: string; seq: number }> {
   const item = await requireItem(db, input.itemId);
-  const body = input.body.trim();
-  if (!body) throw invalid('A message needs some text.');
+  if (!input.body.trim()) throw invalid('A message needs some text.');
+  // The user's words are kept exactly as given; only the agent's are tidied.
+  const body = input.author === 'user' ? input.body : input.body.trim();
   const last = await db
     .selectFrom('discussion_messages')
     .select((eb) => eb.fn.max('seq').as('seq'))

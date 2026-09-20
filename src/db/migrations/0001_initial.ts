@@ -1,5 +1,21 @@
 import { sql, type Kysely } from 'kysely';
-import { APPEND_ONLY_TABLES } from '../schema';
+
+// Frozen copy of the tables this migration protects. It used to import the live list from
+// ../schema, which meant adding a table there silently changed what this committed
+// migration did. The SQL produced is identical; later migrations create their own triggers.
+const APPEND_ONLY_TABLES = [
+  'analysis_runs',
+  'item_revisions',
+  'item_sources',
+  'relations',
+  'discussion_messages',
+  'decisions',
+  'assessments',
+  'evidence_details',
+  'syntheses',
+  'guided_steps',
+  'events',
+] as const;
 
 /**
  * Initial schema.

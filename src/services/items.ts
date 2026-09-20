@@ -1,15 +1,29 @@
 /**
- * What the user can do to a reasoning item at the review gate. Every operation is
- * additive: parents are never erased, authorship never changes, and each step leaves a
- * decision row plus audit events behind.
+ * Operations on reasoning items at the review gate. Every operation is additive: parents
+ * are never erased, authorship never changes, and each step leaves decision rows and audit
+ * events behind.
+ *
+ * AUTHOR vs APPROVER. Anything that carries text takes an explicit `author`:
+ *   - `user`   the user's own words (typed in the web UI, or relayed verbatim by an agent)
+ *   - `agent`  words the agent wrote, even if the user asked for them and approves them
+ * The structural decision itself (split, merge, supersede, promote) is always the user's,
+ * recorded separately in `decisions`; when an agent executes it, `recordDecision` insists
+ * on the user's own instruction (see services/operation.ts).
  */
 import { discussRequest } from '../ai/passes';
 import type { DiscussOutput } from '../ai/schemas';
 import type { DbOrTrx, IdeasTable, ReasoningItemsTable } from '../db/schema';
-import { conflict, invalid } from '../domain/errors';
-import { USER_CREATABLE_KINDS, type DecisionType, type ItemKind } from '../domain/vocabulary';
+import { conflict, forbidden, invalid } from '../domain/errors';
+import {
+  USER_CREATABLE_KINDS,
+  type Author,
+  type DecisionType,
+  type ItemKind,
+  type Origin,
+} from '../domain/vocabulary';
 import type { AppContext } from './context';
 import { captureIdea } from './ideas';
+import { requireUserAuthority } from './operation';
 import { executePass } from './pipeline';
 import { buildSnapshot } from './queries';
 import {
@@ -34,10 +48,12 @@ const USER_DECISIONS: readonly DecisionType[] = [
   'flag_needs_user',
 ];
 
-function userKind(kind: ItemKind | undefined, fallback: ItemKind): ItemKind {
+const originOf = (author: Author | undefined): Origin => (author === 'agent' ? 'agent' : 'user');
+
+function creatableKind(kind: ItemKind | undefined, fallback: ItemKind): ItemKind {
   const chosen = kind ?? (USER_CREATABLE_KINDS.includes(fallback) ? fallback : 'hypothesis');
   if (!USER_CREATABLE_KINDS.includes(chosen))
-    throw invalid(`You cannot create a "${chosen}" item by hand.`);
+    throw invalid(`A "${chosen}" item cannot be created by hand.`);
   return chosen;
 }
 
@@ -47,7 +63,7 @@ export interface DecideInput {
   qualification?: string | undefined;
 }
 
-/** Accept, qualify, reject, reopen, or set aside as a tangent. The discussion stays. */
+/** Accept, qualify, reject, reopen, or set aside as a tangent. The user's call; the discussion stays. */
 export async function decide(db: DbOrTrx, itemId: string, input: DecideInput) {
   if (!USER_DECISIONS.includes(input.decision))
     throw invalid(`Use the dedicated operation for "${input.decision}".`);
@@ -65,6 +81,8 @@ export async function decide(db: DbOrTrx, itemId: string, input: DecideInput) {
 export interface ChildInput {
   text: string;
   kind?: ItemKind | undefined;
+  /** Who wrote this part. Defaults to the user. */
+  author?: Author | undefined;
 }
 
 /** Split one item into several. The parent stays, marked `split`, with its children linked. */
@@ -81,9 +99,10 @@ export async function splitItem(
     for (const child of input.children) {
       const row = await createItem(trx, {
         idea,
-        kind: userKind(child.kind, parent.kind),
-        origin: 'user',
+        kind: creatableKind(child.kind, parent.kind),
+        origin: originOf(child.author),
         text: child.text,
+        verbatim: child.author !== 'agent', // the user's words are kept exactly
         via: 'split',
       });
       await createRelation(trx, {
@@ -91,7 +110,7 @@ export async function splitItem(
         fromItemId: row.id,
         toItemId: parent.id,
         type: 'derived_from',
-        author: 'user',
+        author: 'user', // the split, and so this genealogy, is the user's decision
         note: 'split',
       });
       children.push(row);
@@ -109,7 +128,7 @@ export async function splitItem(
       itemId: parent.id,
       type: 'item.split',
       actor: 'user',
-      payload: { childIds },
+      payload: { childIds, childAuthors: input.children.map((c) => c.author ?? 'user') },
     });
     return children;
   });
@@ -117,21 +136,29 @@ export async function splitItem(
 
 /**
  * Grow a new item out of an existing one without retiring the parent: a new hypothesis,
- * a correction, a question needing research, or (with `asTangent`) a tangent.
+ * a correction, a question needing research, or (with `asTangent`) a tangent. No judgement
+ * call is involved, so an agent may do this on its own account, as the agent.
  */
 export async function branchItem(
   db: DbOrTrx,
   itemId: string,
-  input: { text: string; kind?: ItemKind | undefined; asTangent?: boolean | undefined },
+  input: {
+    text: string;
+    kind?: ItemKind | undefined;
+    asTangent?: boolean | undefined;
+    author?: Author | undefined;
+  },
 ): Promise<ReasoningItemsTable> {
+  const author: Author = input.author ?? 'user';
   return inTransaction(db, async (trx) => {
     const parent = await requireItem(trx, itemId);
     const idea = await requireIdea(trx, parent.idea_id);
     const child = await createItem(trx, {
       idea,
-      kind: userKind(input.kind, input.asTangent ? 'question' : 'hypothesis'),
-      origin: 'user',
+      kind: creatableKind(input.kind, input.asTangent ? 'question' : 'hypothesis'),
+      origin: originOf(author),
       text: input.text,
+      verbatim: author === 'user',
       via: input.asTangent ? 'tangent' : 'branch',
     });
     if (input.asTangent) {
@@ -140,12 +167,12 @@ export async function branchItem(
         fromItemId: child.id,
         toItemId: parent.id,
         type: 'tangent_of',
-        author: 'user',
+        author,
       });
       await recordDecision(trx, {
         itemId: child.id,
         type: 'mark_tangent',
-        author: 'user',
+        author,
         rationale: 'Created as a tangent.',
       });
     } else {
@@ -154,14 +181,14 @@ export async function branchItem(
         fromItemId: parent.id,
         toItemId: child.id,
         type: 'branches_to',
-        author: 'user',
+        author,
       });
     }
     await logEvent(trx, {
       ideaId: idea.id,
       itemId: parent.id,
       type: 'item.branched',
-      actor: 'user',
+      actor: author,
       payload: { childId: child.id, asTangent: Boolean(input.asTangent) },
     });
     return child;
@@ -176,6 +203,7 @@ export async function mergeItems(
     text: string;
     kind?: ItemKind | undefined;
     rationale?: string | undefined;
+    author?: Author | undefined;
   },
 ): Promise<ReasoningItemsTable> {
   const ids = [...new Set(input.itemIds)];
@@ -188,9 +216,10 @@ export async function mergeItems(
     const idea = await requireIdea(trx, first.idea_id);
     const merged = await createItem(trx, {
       idea,
-      kind: userKind(input.kind, first.kind),
-      origin: 'user',
+      kind: creatableKind(input.kind, first.kind),
+      origin: originOf(input.author),
       text: input.text,
+      verbatim: input.author !== 'agent',
       via: 'merge',
     });
     for (const source of sources) {
@@ -214,7 +243,7 @@ export async function mergeItems(
       itemId: merged.id,
       type: 'item.merged',
       actor: 'user',
-      payload: { sourceIds: ids },
+      payload: { sourceIds: ids, textAuthor: input.author ?? 'user' },
     });
     return merged;
   });
@@ -229,6 +258,7 @@ export async function supersedeItem(
     kind?: ItemKind | undefined;
     reason?: string | undefined;
     causedByItemId?: string | undefined;
+    author?: Author | undefined;
   },
 ): Promise<ReasoningItemsTable> {
   return inTransaction(db, async (trx) => {
@@ -240,9 +270,10 @@ export async function supersedeItem(
     }
     const replacement = await createItem(trx, {
       idea,
-      kind: userKind(input.kind, old.kind),
-      origin: 'user',
+      kind: creatableKind(input.kind, old.kind),
+      origin: originOf(input.author),
       text: input.text,
+      verbatim: input.author !== 'agent',
       via: 'supersede',
     });
     await createRelation(trx, {
@@ -265,22 +296,46 @@ export async function supersedeItem(
       itemId: old.id,
       type: 'item.superseded',
       actor: 'user',
-      payload: { replacementId: replacement.id, causedByItemId: input.causedByItemId ?? null },
+      payload: {
+        replacementId: replacement.id,
+        causedByItemId: input.causedByItemId ?? null,
+        textAuthor: input.author ?? 'user',
+      },
     });
     return replacement;
   });
 }
 
-/** Reword an item. Small refinements only; use `supersedeItem` for a change of substance. */
+/**
+ * Reword an item. Small refinements only; use `supersedeItem` for a change of substance.
+ * An agent may only reword what the agent itself originated: rewording the user's thought
+ * would put the agent's words under the user's name. It should propose a branch or a
+ * superseding item instead, for the user to decide on.
+ */
 export function reviseItem(
   db: DbOrTrx,
   itemId: string,
-  input: { text: string; reason?: string | undefined; causedByItemId?: string | undefined },
+  input: {
+    text: string;
+    reason?: string | undefined;
+    causedByItemId?: string | undefined;
+    author?: Author | undefined;
+  },
 ) {
-  return inTransaction(db, (trx) => addRevision(trx, { itemId, author: 'user', ...input }));
+  const author: Author = input.author ?? 'user';
+  return inTransaction(db, async (trx) => {
+    if (author === 'agent') {
+      const item = await requireItem(trx, itemId);
+      if (item.origin !== 'agent')
+        throw forbidden(
+          "An agent may not reword the user's thought. Propose a branch or a superseding item for the user to decide on.",
+        );
+    }
+    return addRevision(trx, { itemId, ...input, author });
+  });
 }
 
-/** Attach user-supplied evidence to an item. Evidence is itself a node in the graph. */
+/** Attach evidence to an item. Evidence is itself a node in the graph. */
 export async function attachEvidence(
   db: DbOrTrx,
   itemId: string,
@@ -290,16 +345,18 @@ export async function attachEvidence(
     sourceTitle: string;
     url?: string | undefined;
     excerpt?: string | undefined;
+    author?: Author | undefined;
   },
 ): Promise<ReasoningItemsTable> {
   if (!input.sourceTitle.trim()) throw invalid('Evidence needs a source.');
+  const author: Author = input.author ?? 'user';
   return inTransaction(db, async (trx) => {
     const target = await requireItem(trx, itemId);
     const idea = await requireIdea(trx, target.idea_id);
     const evidence = await createItem(trx, {
       idea,
       kind: 'evidence',
-      origin: 'user',
+      origin: originOf(author),
       text: input.text,
       via: 'evidence',
     });
@@ -318,13 +375,13 @@ export async function attachEvidence(
       fromItemId: evidence.id,
       toItemId: target.id,
       type: input.stance === 'for' ? 'evidence_for' : 'evidence_against',
-      author: 'user',
+      author,
     });
     await logEvent(trx, {
       ideaId: idea.id,
       itemId: target.id,
       type: 'evidence.attached',
-      actor: 'user',
+      actor: author,
       payload: {
         evidenceItemId: evidence.id,
         stance: input.stance,
@@ -336,20 +393,24 @@ export async function attachEvidence(
 }
 
 /**
- * Post to an item's discussion thread and, optionally, ask the agent to reply. The
- * user's message is committed first, so it survives even if the agent call fails.
+ * Add one contribution to an item's thread. No model is involved: the web UI, or an agent
+ * in a VS Code panel, posts the user's words as the user's and its own words as its own.
  */
-export async function discuss(
+export function postContribution(
+  db: DbOrTrx,
+  itemId: string,
+  input: { author: Author; body: string },
+) {
+  return inTransaction(db, (trx) => postMessage(trx, { itemId, ...input }));
+}
+
+/** Ask the configured provider to reply in an item's thread. */
+export async function requestAgentReply(
   ctx: AppContext,
   itemId: string,
-  input: { body: string; askAgent?: boolean | undefined },
+  options: { signal?: AbortSignal | undefined } = {},
 ): Promise<void> {
   const item = await requireItem(ctx.db, itemId);
-  await inTransaction(ctx.db, (trx) =>
-    postMessage(trx, { itemId, author: 'user', body: input.body }),
-  );
-  if (!input.askAgent) return;
-
   const snapshot = await buildSnapshot(ctx.db, item.idea_id);
   const thread = await ctx.db
     .selectFrom('discussion_messages')
@@ -366,20 +427,37 @@ export async function discuss(
       const body = out.suggestion ? `${out.reply}\n\nSuggestion: ${out.suggestion}` : out.reply;
       await postMessage(trx, { itemId, author: 'agent', body, runId });
     },
+    // A reply is added to a thread; it does not compute new state from the idea, so a
+    // newer message or decision does not invalidate it. The version it saw is recorded.
+    { readVersion: snapshot.inputVersion, checkVersion: false, signal: options.signal },
   );
+}
+
+/**
+ * Post the user's message and, optionally, get a provider reply in the same call. The
+ * user's message is committed first, so it survives even if the agent call fails.
+ */
+export async function discuss(
+  ctx: AppContext,
+  itemId: string,
+  input: { body: string; askAgent?: boolean | undefined },
+): Promise<void> {
+  await postContribution(ctx.db, itemId, { author: 'user', body: input.body });
+  if (input.askAgent) await requestAgentReply(ctx, itemId);
 }
 
 /**
  * Tangent -> new idea. The new idea records the item it grew from, and its root item
  * keeps the tangent's authorship: an AI-proposed tangent does not become "the user's
- * idea" by being promoted. If the user supplies their own framing, that framing is theirs.
+ * idea" by being promoted. A reframing is attributed to whoever wrote it.
  */
 export async function promoteTangent(
   db: DbOrTrx,
   itemId: string,
-  input: { framing?: string | undefined } = {},
+  input: { framing?: string | undefined; framingAuthor?: Author | undefined } = {},
 ): Promise<IdeasTable> {
   return inTransaction(db, async (trx) => {
+    requireUserAuthority('promote a tangent to a new idea');
     const item = await requireItem(trx, itemId);
     if (item.status !== 'tangent')
       throw invalid('Only items in the tangent library can be promoted.');
@@ -390,11 +468,11 @@ export async function promoteTangent(
       .executeTakeFirst();
     if (already) throw conflict('This tangent has already been promoted to its own idea.');
 
-    const framing = input.framing?.trim();
+    const framing = input.framing?.trim() ? input.framing.trim() : undefined;
     const idea = await captureIdea(trx, {
-      text: framing || item.text,
+      text: framing ?? item.text,
       source: 'promoted_tangent',
-      rootOrigin: framing ? 'user' : item.origin,
+      rootOrigin: framing ? originOf(input.framingAuthor) : item.origin,
       sourceItemId: item.id,
       sourceIdeaId: item.idea_id,
     });
@@ -409,7 +487,11 @@ export async function promoteTangent(
       ideaId: idea.id,
       type: 'idea.promoted_from_tangent',
       actor: 'user',
-      payload: { sourceIdeaId: item.idea_id, sourceItemId: item.id, userFraming: Boolean(framing) },
+      payload: {
+        sourceIdeaId: item.idea_id,
+        sourceItemId: item.id,
+        framingAuthor: framing ? (input.framingAuthor ?? 'user') : null,
+      },
     });
     return idea;
   });

@@ -27,7 +27,7 @@ import {
   listOpenQuestions,
   listTangents,
 } from '../src/services/queries';
-import { analysedPyramids, itemByKey, PYRAMIDS_TEXT, testContext } from './helpers';
+import { analysedPyramids, itemByKey, overrideAll, PYRAMIDS_TEXT, testContext } from './helpers';
 
 let ctx: AppContext;
 beforeEach(async () => {
@@ -366,11 +366,11 @@ describe('7. synthesis points back to its sources', () => {
 
   it('keeps earlier syntheses as superseded versions', async () => {
     const idea = await analysedPyramids(ctx);
-    await runSynthesis(ctx, idea.id, { force: true });
+    await runSynthesis(ctx, idea.id, await overrideAll(ctx, idea.id));
     await decide(ctx.db, (await itemByKey(ctx, idea.id, 'e_hypothesis')).id, {
       decision: 'accept',
     });
-    await runSynthesis(ctx, idea.id, { force: true });
+    await runSynthesis(ctx, idea.id, await overrideAll(ctx, idea.id));
 
     const [v1, v2] = [
       await getSynthesis(ctx.db, idea.id, 1),

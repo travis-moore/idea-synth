@@ -4,7 +4,7 @@
  * broke one of the project's own non-negotiables.
  */
 import { describe, expect, it } from 'vitest';
-import { MockProvider, type ModelProvider, type StructuredRequest } from '../src/ai';
+import type { StructuredRequest } from '../src/ai';
 import { openTestDb } from '../src/db/client';
 import { locateQuote } from '../src/domain/quotes';
 import {
@@ -18,20 +18,27 @@ import { captureIdea } from '../src/services/ideas';
 import { decide, promoteTangent, supersedeItem } from '../src/services/items';
 import { runAnalysis, runSynthesis } from '../src/services/pipeline';
 import { getIdea, getSynthesis, listIdeaItems, listInbox, listRuns } from '../src/services/queries';
-import { analysedPyramids, itemByKey, PYRAMIDS_TEXT, testContext } from './helpers';
+import {
+  analysedPyramids,
+  itemByKey,
+  overrideAll,
+  providerFrom,
+  PYRAMIDS_TEXT,
+  testContext,
+  TestProvider,
+} from './helpers';
 
-class Tamper implements ModelProvider {
-  readonly name = 'tamper';
-  readonly model = 'test';
-  readonly live = false;
+class Tamper extends TestProvider {
+  override readonly name = 'tamper';
   calls: string[] = [];
-  private readonly inner = new MockProvider();
   constructor(
     private readonly key: string,
     private readonly fn: (output: never) => unknown,
     public remaining = Infinity,
-  ) {}
-  async generate<T>(request: StructuredRequest<T>): Promise<unknown> {
+  ) {
+    super();
+  }
+  override async generate<T>(request: StructuredRequest<T>): Promise<unknown> {
     this.calls.push(`${request.pass}:${request.task}`);
     const output = await this.inner.generate(request);
     if (`${request.pass}:${request.task}` !== this.key || this.remaining <= 0) return output;
@@ -133,7 +140,7 @@ describe('review gate', () => {
     const provider = new Tamper('synthesize:synthesize', () => 'not json', 1);
     const ctx = { db: await openTestDb(), provider };
     const idea = await analysedPyramids(ctx);
-    await expect(runSynthesis(ctx, idea.id, { force: true })).rejects.toThrow(
+    await expect(runSynthesis(ctx, idea.id, await overrideAll(ctx, idea.id))).rejects.toThrow(
       /synthesize pass failed/,
     );
     const overrides = async () =>
@@ -143,7 +150,7 @@ describe('review gate', () => {
     expect(await overrides()).toBe(0);
 
     // Retry: the Builder is not run a second time, and the override is now on record.
-    await runSynthesis(ctx, idea.id, { force: true });
+    await runSynthesis(ctx, idea.id, await overrideAll(ctx, idea.id));
     expect(await overrides()).toBe(1);
     const runs = (await listRuns(ctx.db, idea.id)).filter(
       (r) => r.pass === 'builder' || r.pass === 'synthesize',
@@ -161,18 +168,13 @@ describe('review gate', () => {
     const idea = await analysedPyramids(ctx);
     await clearInbox(ctx.db, idea.id);
     const target = await itemByKey(ctx, idea.id, 'x_coordination');
-    const racing: ModelProvider = {
-      name: 'racing',
-      model: 'test',
-      live: false,
-      generate: async (request) => {
-        if (request.pass === 'synthesize')
-          await decide(ctx.db, target.id, { decision: 'flag_needs_user' });
-        return ctx.provider.generate(request);
-      },
-    };
+    const racing = providerFrom(async (request, mock) => {
+      if (request.pass === 'synthesize')
+        await decide(ctx.db, target.id, { decision: 'flag_needs_user' });
+      return mock.generate(request);
+    });
     await expect(runSynthesis({ db: ctx.db, provider: racing }, idea.id)).rejects.toThrow(
-      /still need your input/,
+      /changed while|still need your input/,
     );
     expect(await getSynthesis(ctx.db, idea.id)).toBeNull();
   });
@@ -182,7 +184,7 @@ describe('state machines cannot wedge', () => {
   it('does not let a synthesis record be superseded by hand, so re-synthesis always works', async () => {
     const ctx = await testContext();
     const idea = await analysedPyramids(ctx);
-    await runSynthesis(ctx, idea.id, { force: true });
+    await runSynthesis(ctx, idea.id, await overrideAll(ctx, idea.id));
     const v1 = (await getSynthesis(ctx.db, idea.id))!;
     await expect(supersedeItem(ctx.db, v1.itemId, { text: 'My own wording.' })).rejects.toThrow(
       /cannot be decided on/,
@@ -191,7 +193,7 @@ describe('state machines cannot wedge', () => {
     expect((await listIdeaItems(ctx.db, idea.id)).some((i) => i.text === 'My own wording.')).toBe(
       false,
     );
-    await runSynthesis(ctx, idea.id, { force: true });
+    await runSynthesis(ctx, idea.id, await overrideAll(ctx, idea.id));
     expect((await getSynthesis(ctx.db, idea.id))!.version).toBe(2);
   });
 

@@ -50,7 +50,9 @@ export type IdPrefix =
   | 'run'
   | 'syn'
   | 'gs'
-  | 'step';
+  | 'step'
+  | 'op'
+  | 'job';
 
 export function newId(prefix: IdPrefix): string {
   return `${prefix}_${ulid()}`;

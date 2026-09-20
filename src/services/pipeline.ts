@@ -1,102 +1,474 @@
 /**
- * The eight-stage workflow.
+ * The eight-stage workflow, for every kind of reasoner.
  *
- *   runAnalysis  = Steps 2-5 (extract -> explore -> epistemic -> adversarial)
+ *   Steps 2-5  extract -> explore -> epistemic -> adversarial      (analysis)
  *   [review gate: the user works through the items]
- *   runSynthesis = Steps 6-8 (builder -> synthesis + tangent archive)
+ *   Steps 6-8  builder -> synthesize (+ tangent archive)           (synthesis)
  *
- * Each pass is one provider call, validated against its schema, then applied in ONE
- * transaction together with its `analysis_runs` row. A pass either lands completely or
- * leaves nothing behind except a `failed` run recording why.
+ * A pass has three phases, and only the middle one involves a model:
+ *
+ *   preparePass  read the idea at a known INPUT VERSION and build the request
+ *   (reasoning)  a provider, a local worker, or the agent in a VS Code panel produces output
+ *   commitPass   validate the output, then, in ONE transaction: refuse it if the idea has
+ *                changed since it was read, refuse it if it is not the legal next pass,
+ *                otherwise record the run and apply it
+ *
+ * No transaction is ever open while a model is thinking. Valid output that arrives too
+ * late is kept as a `stale` run; it is history, but it never becomes current reasoning.
  */
 import type { Transaction } from 'kysely';
-import { ZodError } from 'zod';
-import { analysisRequests } from '../ai/passes';
-import type { StructuredRequest } from '../ai/provider';
+import { ZodError, type z } from 'zod';
+import { analysisRequests, type IdeaSnapshot } from '../ai/passes';
+import { ProviderError, type ProviderInfo, type StructuredRequest } from '../ai/provider';
 import type {
   AdversarialOutput,
   BuilderOutput,
   EpistemicOutput,
   ExploreOutput,
   ExtractOutput,
-  NewItemOutput,
   SynthesizeOutput,
 } from '../ai/schemas';
-import type { SynthesisBodyDto } from '../api-types';
-import type { Database, DbOrTrx, IdeasTable } from '../db/schema';
+import type { Database, Db, IdeasTable } from '../db/schema';
 import { conflict, DomainError, invalid, upstream } from '../domain/errors';
 import { newId } from '../domain/ids';
-import { locateQuote } from '../domain/quotes';
-import { evaluateReviewGate } from '../domain/rules';
+import { ANALYSIS_PASS_ORDER, type Pass } from '../domain/vocabulary';
 import {
-  ANALYSIS_PASS_ORDER,
-  EXTRACTABLE_KINDS,
-  type ItemKind,
-  type Pass,
-  type RelationType,
-} from '../domain/vocabulary';
+  applyEpistemic,
+  applyFlags,
+  applyNewItems,
+  applySynthesis,
+  enforceGate,
+  type GateOverride,
+} from './apply';
 import type { AppContext } from './context';
 import { setStage } from './ideas';
+import { applyOperation, StaleInputError, type OperationMeta } from './operation';
 import { buildSnapshot } from './queries';
-import {
-  createItem,
-  createRelation,
-  logEvent,
-  nowIso,
-  recordAssessment,
-  recordDecision,
-  requireIdea,
-} from './store';
+import { logEvent, nowIso, requireIdea } from './store';
 
 type Trx = Transaction<Database>;
 
-/** What each pass is allowed to add. A model that strays outside fails validation. */
-const ALLOWED_KINDS: Record<
-  'extract' | 'explore' | 'epistemic' | 'adversarial' | 'builder',
-  readonly ItemKind[]
-> = {
-  extract: EXTRACTABLE_KINDS,
-  explore: ['implication', 'extension', 'question', 'analogy', 'hypothesis'],
-  epistemic: ['correction'],
-  adversarial: ['objection', 'question', 'assumption', 'uncertainty'],
-  builder: [
-    'hypothesis',
-    'example',
-    'test',
-    'distinction',
-    'question',
-    'implication',
-    'extension',
-    'inference',
-  ],
+export type WorkflowPass = (typeof ANALYSIS_PASS_ORDER)[number] | 'builder' | 'synthesize';
+export const WORKFLOW_PASSES: readonly WorkflowPass[] = [
+  ...ANALYSIS_PASS_ORDER,
+  'builder',
+  'synthesize',
+];
+
+/** Who produced a pass output. Recorded on the run; never includes a secret. */
+export type Producer = ProviderInfo;
+
+export interface PassOptions {
+  override?: GateOverride | undefined;
+  signal?: AbortSignal | undefined;
+  onProgress?: ((message: string) => void | Promise<void>) | undefined;
+  /** Envelope for the operations this run performs. Defaults to a system worker. */
+  meta?: Partial<OperationMeta> | undefined;
+}
+
+function describeFailure(error: unknown): string {
+  if (error instanceof ZodError)
+    return `Output failed validation: ${error.issues
+      .slice(0, 5)
+      .map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`)
+      .join('; ')}`;
+  return error instanceof Error ? error.message : String(error);
+}
+
+const labelOf = (request: { pass: Pass; task: string }) =>
+  request.task === request.pass ? request.pass : `${request.pass} (${request.task})`;
+
+export interface CommitArgs<T> {
+  ideaId: string;
+  request: Pick<StructuredRequest<T>, 'pass' | 'task' | 'promptVersion' | 'input' | 'schema'>;
+  /** Unvalidated output, from whatever reasoner produced it. */
+  raw: unknown;
+  producer: Producer;
+  /** The idea revision the request was built from. */
+  readVersion: number;
+  /** False only for passes that add to a thread rather than compute from state (discussion). */
+  checkVersion: boolean;
+  meta: OperationMeta;
+  startedAt?: string;
+  /**
+   * Checked inside the commit transaction BEFORE the run is recorded as completed (e.g. is
+   * this still the legal next pass?). Throwing refuses the output.
+   */
+  guard?: ((trx: Trx) => Promise<void>) | undefined;
+}
+
+export interface Committed<R> {
+  result: R;
+  runId: string | null;
+  inputVersion: number | null;
+  replayed: boolean;
+}
+
+type RunArgs = Omit<CommitArgs<unknown>, 'raw' | 'request'> & {
+  request: Pick<StructuredRequest<unknown>, 'pass' | 'task' | 'promptVersion' | 'input'>;
 };
 
-type ItemPass = keyof typeof ALLOWED_KINDS;
+function runRecord(args: RunArgs) {
+  return {
+    idea_id: args.ideaId,
+    pass: args.request.pass,
+    provider: args.producer.name,
+    model: args.producer.model,
+    model_source: args.producer.modelSource,
+    auth_mode: args.producer.authMode,
+    prompt_version: args.request.promptVersion,
+    input_json: JSON.stringify({ task: args.request.task, input: args.request.input }),
+    input_version: args.readVersion,
+    started_at: args.startedAt ?? nowIso(),
+  };
+}
+
+/** Record an attempt that changed nothing: a failure, or valid output that arrived too late. */
+async function recordUnappliedRun(
+  db: Db,
+  args: RunArgs,
+  status: 'failed' | 'stale',
+  message: string,
+  output: unknown,
+): Promise<void> {
+  const runId = newId('run');
+  await db.transaction().execute(async (trx) => {
+    await trx
+      .insertInto('analysis_runs')
+      .values({
+        ...runRecord(args),
+        id: runId,
+        status,
+        output_json: output === undefined ? null : JSON.stringify(output),
+        error: message,
+        operation_id: null,
+        finished_at: nowIso(),
+      })
+      .execute();
+    await logEvent(trx, {
+      ideaId: args.ideaId,
+      type: status === 'stale' ? 'run.stale' : 'run.failed',
+      actor: 'system',
+      runId,
+      payload: {
+        pass: args.request.pass,
+        task: args.request.task,
+        producer: args.producer.name,
+        error: message,
+      },
+    });
+  });
+}
+
+/** Ask the provider, recording a failed run if it errors. */
+async function generateOrRecord<T>(
+  ctx: AppContext,
+  args: RunArgs,
+  request: StructuredRequest<T>,
+  signal?: AbortSignal,
+) {
+  try {
+    return await ctx.provider.generate(request, { signal });
+  } catch (error) {
+    const message = describeFailure(error);
+    await recordUnappliedRun(ctx.db, args, 'failed', message, undefined).catch(() => undefined);
+    throw new DomainError(
+      'upstream',
+      `The ${labelOf(request)} pass failed and nothing was changed. ${message}`,
+      error instanceof ProviderError ? { reason: error.code } : undefined,
+    );
+  }
+}
+
+/** Provider paths report rejected output as an upstream failure (HTTP 502), not a bad request. */
+function asUpstream(error: unknown): never {
+  if (error instanceof DomainError && error.code === 'invalid')
+    throw upstream(error.message.replace(/ output was rejected/, ' pass failed'));
+  throw error;
+}
 
 /**
- * Edge types a model may write. Structural genealogy (`supersedes`, `merged_into`,
- * `branches_to`, `synthesized_into`, `answers`) and evidence edges are only ever written
- * by the application as part of the operation they record, never on a model's say-so.
+ * Validate `raw` and apply it atomically. Shared by every client; this is the single gate
+ * through which model-produced reasoning enters the database.
  */
-const COMMON_LINKS: readonly RelationType[] = [
-  'derived_from',
-  'supports',
-  'contradicts',
-  'qualifies',
-  'questions',
-  'assumes',
-];
-const ALLOWED_LINKS: Record<ItemPass, readonly RelationType[]> = {
-  extract: COMMON_LINKS,
-  explore: [...COMMON_LINKS, 'tangent_of'],
-  epistemic: [...COMMON_LINKS, 'corrects'],
-  adversarial: COMMON_LINKS,
-  builder: COMMON_LINKS,
-};
-/** Only `assumes` may point *at* the new item (an existing claim assumes a new assumption). */
-const INBOUND_LINKS: readonly RelationType[] = ['assumes'];
+export async function commitPass<T, R>(
+  db: Db,
+  args: CommitArgs<T>,
+  apply: (trx: Trx, output: T, runId: string) => Promise<R>,
+): Promise<Committed<R>> {
+  const { ideaId, request } = args;
+  const recordUnapplied = (status: 'failed' | 'stale', message: string, output: unknown) =>
+    recordUnappliedRun(db, args, status, message, output);
+  const runBase = runRecord(args);
 
-// One pipeline run per idea at a time. Single-process by design (see ADR 0001).
+  let output: T;
+  try {
+    output = (request.schema as z.ZodType<T>).parse(args.raw);
+  } catch (error) {
+    const message = describeFailure(error);
+    await recordUnapplied('failed', message, undefined);
+    throw invalid(
+      `The ${labelOf(request)} output was rejected and nothing was changed. ${message}`,
+    );
+  }
+
+  try {
+    const outcome = await applyOperation(
+      db,
+      {
+        name: `pass.${request.pass}.${request.task}`,
+        ideaId,
+        meta: { ...args.meta, inputVersion: args.checkVersion ? args.readVersion : undefined },
+      },
+      async (trx) => {
+        await args.guard?.(trx);
+        const runId = newId('run');
+        await trx
+          .insertInto('analysis_runs')
+          .values({
+            ...runBase,
+            id: runId,
+            status: 'completed',
+            output_json: JSON.stringify(output),
+            error: null,
+            operation_id: null,
+            finished_at: nowIso(),
+          })
+          .execute();
+        await logEvent(trx, {
+          ideaId,
+          type: 'run.completed',
+          actor: 'system',
+          runId,
+          payload: { pass: request.pass, task: request.task, producer: args.producer.name },
+        });
+        return { runId, result: await apply(trx, output, runId) };
+      },
+    );
+    return {
+      result: outcome.result.result,
+      runId: outcome.result.runId,
+      inputVersion: outcome.inputVersion,
+      replayed: outcome.replayed,
+    };
+  } catch (error) {
+    if (error instanceof StaleInputError) {
+      // Valid work, computed from a state that no longer exists. Keep it; do not publish it.
+      await recordUnapplied('stale', error.message, output);
+      throw error;
+    }
+    const message = describeFailure(error);
+    await recordUnapplied('failed', message, output);
+    if (error instanceof DomainError && error.code !== 'invalid') throw error;
+    throw invalid(
+      `The ${labelOf(request)} output was rejected and its changes were rolled back (earlier passes are kept). ${message}`,
+    );
+  }
+}
+
+/**
+ * Provider-driven pass: ask the configured provider, then commit like anyone else.
+ * Provider and validation failures surface as `upstream` (HTTP 502).
+ */
+export async function executePass<T, R>(
+  ctx: AppContext,
+  ideaId: string,
+  request: StructuredRequest<T>,
+  apply: (trx: Trx, output: T, runId: string) => Promise<R>,
+  options: {
+    readVersion: number;
+    checkVersion?: boolean;
+    signal?: AbortSignal | undefined;
+    meta?: Partial<OperationMeta> | undefined;
+  },
+): Promise<R> {
+  const startedAt = nowIso();
+  const info = ctx.provider.info();
+  const commitArgs = {
+    ideaId,
+    request,
+    producer: info,
+    readVersion: options.readVersion,
+    checkVersion: options.checkVersion ?? true,
+    startedAt,
+    meta: {
+      client: 'worker',
+      executedBy: 'agent',
+      agentName: info.name,
+      agentModel: info.model,
+      ...options.meta,
+    } satisfies OperationMeta,
+  };
+  const raw = await generateOrRecord(ctx, commitArgs, request, options.signal);
+  try {
+    return (await commitPass(ctx.db, { ...commitArgs, raw }, apply)).result;
+  } catch (error) {
+    asUpstream(error);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Which pass is legal next
+// ---------------------------------------------------------------------------
+
+async function lastCompletedRunId(db: Db | Trx, ideaId: string, pass: Pass): Promise<string> {
+  const row = await db
+    .selectFrom('analysis_runs')
+    .select((eb) => eb.fn.max('id').as('id'))
+    .where('idea_id', '=', ideaId)
+    .where('pass', '=', pass)
+    .where('status', '=', 'completed')
+    .executeTakeFirst();
+  return row?.id ?? '';
+}
+
+/** The next pass of the workflow for this idea, or null if analysis is done and synthesis is up to the user. */
+export async function nextWorkflowPass(db: Db | Trx, ideaId: string): Promise<WorkflowPass> {
+  const idea = await requireIdea(db, ideaId);
+  if (idea.stage === 'captured' || idea.stage === 'guided') {
+    for (const pass of ANALYSIS_PASS_ORDER)
+      if (!(await lastCompletedRunId(db, ideaId, pass))) return pass;
+    return 'builder'; // all four ran but the stage change was lost; synthesis side is next
+  }
+  const [builder, synthesis] = await Promise.all([
+    lastCompletedRunId(db, ideaId, 'builder'),
+    lastCompletedRunId(db, ideaId, 'synthesize'),
+  ]);
+  // Resumable: if the Builder already ran since the last synthesis, do not run it again.
+  return builder > synthesis ? 'synthesize' : 'builder';
+}
+
+async function assertLegal(db: Db | Trx, ideaId: string, pass: WorkflowPass): Promise<void> {
+  const expected = await nextWorkflowPass(db, ideaId);
+  if (expected !== pass)
+    throw conflict(`"${pass}" is not the next pass for this idea; the next one is "${expected}".`);
+}
+
+export interface PreparedPass {
+  ideaId: string;
+  pass: WorkflowPass;
+  request: StructuredRequest<unknown>;
+  /** The idea revision this request was built from. Must be echoed when committing. */
+  inputVersion: number;
+}
+
+/** Build the request for the next pass. Cheap, read-only, and never calls a model. */
+export async function preparePass(
+  db: Db,
+  ideaId: string,
+  pass: WorkflowPass,
+  options: { override?: GateOverride | undefined } = {},
+): Promise<PreparedPass> {
+  await assertLegal(db, ideaId, pass);
+  // Early gate check, so a blocked gate costs no reasoning. The binding check is at commit.
+  if (pass === 'builder' || pass === 'synthesize') await enforceGate(db, ideaId, options.override);
+  const snapshot: IdeaSnapshot = await buildSnapshot(db, ideaId);
+  const request = analysisRequests[pass](snapshot) as StructuredRequest<unknown>;
+  return { ideaId, pass, request, inputVersion: snapshot.inputVersion };
+}
+
+/** Commit the output of a workflow pass, whoever produced it. */
+export async function commitWorkflowPass(
+  db: Db,
+  prepared: Pick<PreparedPass, 'ideaId' | 'pass' | 'inputVersion'> & {
+    request?: StructuredRequest<unknown> | undefined;
+  },
+  raw: unknown,
+  producer: Producer,
+  meta: OperationMeta,
+  options: { override?: GateOverride | undefined } = {},
+): Promise<Committed<unknown>> {
+  const { ideaId, pass } = prepared;
+  // The request is rebuilt only for its schema and prompt version when the caller is
+  // external; the input recorded on the run is what THEY were given at `inputVersion`.
+  const request =
+    prepared.request ??
+    (analysisRequests[pass]({
+      idea: { id: ideaId, title: '', originalText: '', originalTextOrigin: 'user' },
+      items: [],
+      relations: [],
+      inputVersion: prepared.inputVersion,
+    }) as StructuredRequest<unknown>);
+  const recorded = prepared.request
+    ? request
+    : {
+        ...request,
+        input: {
+          note: 'input was served to an external agent',
+          inputVersion: prepared.inputVersion,
+        },
+      };
+
+  return commitPass(
+    db,
+    {
+      ideaId,
+      request: recorded,
+      raw,
+      producer,
+      readVersion: prepared.inputVersion,
+      checkVersion: true,
+      meta,
+      guard: (trx) => assertLegal(trx, ideaId, pass),
+    },
+    async (trx, output, runId) => {
+      const idea: IdeasTable = await requireIdea(trx, ideaId);
+      switch (pass) {
+        case 'extract':
+          return {
+            created: await applyNewItems(
+              trx,
+              idea,
+              runId,
+              'extract',
+              (output as ExtractOutput).items,
+            ),
+          };
+        case 'explore':
+          return {
+            created: await applyNewItems(
+              trx,
+              idea,
+              runId,
+              'explore',
+              (output as ExploreOutput).items,
+            ),
+          };
+        case 'epistemic':
+          return { created: await applyEpistemic(trx, idea, runId, output as EpistemicOutput) };
+        case 'adversarial': {
+          const out = output as AdversarialOutput;
+          const created = await applyNewItems(trx, idea, runId, 'adversarial', out.items);
+          await applyFlags(trx, idea.id, runId, out.flags);
+          // Steps 2-5 are complete: the idea is now the user's to review.
+          await setStage(trx, ideaId, idea.stage, 'in_review');
+          return { created };
+        }
+        case 'builder':
+          await enforceGate(trx, ideaId, options.override);
+          return {
+            created: await applyNewItems(
+              trx,
+              idea,
+              runId,
+              'builder',
+              (output as BuilderOutput).items,
+            ),
+          };
+        case 'synthesize':
+          return applySynthesis(trx, idea, runId, output as SynthesizeOutput, options.override);
+      }
+    },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Provider-driven runs (web UI, workers, seed)
+// ---------------------------------------------------------------------------
+
+// A courtesy lock so one process does not start two runs for an idea. Correctness does NOT
+// depend on it: every commit re-checks the input version and pass order in its transaction,
+// which also covers other processes (the CLI) and other writers (the user's own decisions).
 const running = new Set<string>();
 async function withIdeaLock<T>(ideaId: string, fn: () => Promise<T>): Promise<T> {
   if (running.has(ideaId)) throw conflict('A reasoning run is already in progress for this idea.');
@@ -108,596 +480,78 @@ async function withIdeaLock<T>(ideaId: string, fn: () => Promise<T>): Promise<T>
   }
 }
 
-function describeFailure(error: unknown): string {
-  if (error instanceof ZodError)
-    return `Model output failed validation: ${error.issues
-      .slice(0, 5)
-      .map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`)
-      .join('; ')}`;
-  return error instanceof Error ? error.message : String(error);
+async function runPass(ctx: AppContext, ideaId: string, pass: WorkflowPass, options: PassOptions) {
+  options.signal?.throwIfAborted();
+  await options.onProgress?.(`Running ${pass}`);
+  const prepared = await preparePass(ctx.db, ideaId, pass, options);
+  const startedAt = nowIso();
+  const info = ctx.provider.info();
+  const meta: OperationMeta = {
+    client: 'worker',
+    executedBy: 'agent',
+    agentName: info.name,
+    agentModel: info.model,
+    ...options.meta,
+  };
+  const raw = await generateOrRecord(
+    ctx,
+    {
+      ideaId,
+      request: prepared.request,
+      producer: info,
+      readVersion: prepared.inputVersion,
+      checkVersion: true,
+      meta,
+      startedAt,
+    },
+    prepared.request,
+    options.signal,
+  );
+  try {
+    await commitWorkflowPass(ctx.db, prepared, raw, info, meta, options);
+  } catch (error) {
+    asUpstream(error);
+  }
 }
 
-/**
- * Call the provider, validate, and apply the result atomically. Exported for the
- * discussion and tutor services, which are passes too.
- */
-export async function executePass<T, R>(
+/** Steps 2-5. Resumable: passes that already completed are not repeated. */
+export async function runAnalysis(
   ctx: AppContext,
   ideaId: string,
-  request: StructuredRequest<T>,
-  apply: (trx: Trx, output: T, runId: string) => Promise<R>,
-): Promise<R> {
-  const startedAt = nowIso();
-  const base = {
-    idea_id: ideaId,
-    pass: request.pass,
-    provider: ctx.provider.name,
-    model: ctx.provider.model,
-    prompt_version: request.promptVersion,
-    input_json: JSON.stringify({ task: request.task, input: request.input }),
-    started_at: startedAt,
-  };
-  try {
-    const raw = await ctx.provider.generate(request);
-    const output = request.schema.parse(raw);
-    return await ctx.db.transaction().execute(async (trx) => {
-      const runId = newId('run');
-      await trx
-        .insertInto('analysis_runs')
-        .values({
-          ...base,
-          id: runId,
-          status: 'completed',
-          output_json: JSON.stringify(output),
-          error: null,
-          finished_at: nowIso(),
-        })
-        .execute();
-      await logEvent(trx, {
-        ideaId,
-        type: 'run.completed',
-        actor: 'system',
-        runId,
-        payload: { pass: request.pass, task: request.task, provider: ctx.provider.name },
-      });
-      return apply(trx, output, runId);
-    });
-  } catch (error) {
-    const message = describeFailure(error);
-    const runId = newId('run');
-    await ctx.db.transaction().execute(async (trx) => {
-      await trx
-        .insertInto('analysis_runs')
-        .values({
-          ...base,
-          id: runId,
-          status: 'failed',
-          output_json: null,
-          error: message,
-          finished_at: nowIso(),
-        })
-        .execute();
-      await logEvent(trx, {
-        ideaId,
-        type: 'run.failed',
-        actor: 'system',
-        runId,
-        payload: { pass: request.pass, task: request.task, error: message },
-      });
-    });
-    if (error instanceof DomainError && error.code !== 'invalid') throw error;
-    throw upstream(
-      `The ${request.pass} pass failed and its changes were rolled back (earlier passes are kept). ${message}`,
-    );
-  }
-}
-
-/** Resolve a model-supplied reference: a key from this output, or an existing item id. */
-function resolver(existingIds: Set<string>, keyToId: Map<string, string>) {
-  return (ref: string): string => {
-    const id = keyToId.get(ref) ?? (existingIds.has(ref) ? ref : undefined);
-    if (!id) throw invalid(`Model output refers to an unknown item "${ref}".`);
-    return id;
-  };
-}
-
-async function existingItemIds(trx: Trx, ideaId: string): Promise<Set<string>> {
-  const rows = await trx
-    .selectFrom('reasoning_items')
-    .select('id')
-    .where('idea_id', '=', ideaId)
-    .execute();
-  return new Set(rows.map((r) => r.id));
-}
-
-/** Create the items a pass proposed, then their edges (so they can refer to one another). */
-async function applyNewItems(
-  trx: Trx,
-  idea: IdeasTable,
-  runId: string,
-  pass: ItemPass,
-  items: Array<NewItemOutput & { source_quotes?: string[] }>,
-): Promise<Map<string, string>> {
-  const existing = await existingItemIds(trx, idea.id);
-  const root = await trx
-    .selectFrom('reasoning_items')
-    .select(['id', 'origin'])
-    .where('idea_id', '=', idea.id)
-    .where('kind', '=', 'original_idea')
-    .executeTakeFirstOrThrow();
-
-  const keyToId = new Map<string, string>();
-  for (const item of items) {
-    if (!ALLOWED_KINDS[pass].includes(item.kind))
-      throw invalid(`The ${pass} pass may not create items of kind "${item.kind}".`);
-    if (keyToId.has(item.key)) throw invalid(`Duplicate item key "${item.key}" in model output.`);
-    if (pass !== 'extract' && item.links.length === 0)
-      throw invalid(`Item "${item.key}" is not linked to anything it arose from.`);
-    for (const link of item.links) {
-      if (!ALLOWED_LINKS[pass].includes(link.type))
-        throw invalid(`The ${pass} pass may not create "${link.type}" edges.`);
-      if (link.direction === 'in' && !INBOUND_LINKS.includes(link.type))
-        throw invalid(`A "${link.type}" edge cannot point at a newly created item.`);
-    }
-
-    // `extracted_from_user` is a permanent claim that the user said this. It is only
-    // made when the captured text really is the user's AND a quote is found in it.
-    // Otherwise the item is the agent's, and an unfounded extraction is put to the user.
-    const located = (item.source_quotes ?? []).some((q) => locateQuote(idea.original_text, q));
-    const fromUser = pass === 'extract' && root.origin === 'user' && located;
-    const unfounded = pass === 'extract' && root.origin === 'user' && !located;
-    // Builder output is a proposal made after the gate; it must not re-close the gate
-    // behind the user's back, so it is never `needs_user`.
-    const needsUser = unfounded || (item.needs_user && !item.is_tangent && pass !== 'builder');
-
-    const row = await createItem(trx, {
-      idea,
-      kind: item.kind,
-      origin: fromUser ? 'extracted_from_user' : 'agent',
-      text: item.text,
-      status: needsUser ? 'needs_user' : 'open',
-      attentionReason: unfounded ? 'clarification_needed' : (item.attention_reason ?? null),
-      runId,
-      runKey: item.key,
-      sourceQuotes: item.source_quotes ?? [],
-      via: pass,
-    });
-    keyToId.set(item.key, row.id);
-  }
-
-  const resolve = resolver(existing, keyToId);
-  for (const item of items) {
-    const itemId = keyToId.get(item.key)!;
-    for (const link of item.links) {
-      const other = resolve(link.to);
-      await createRelation(trx, {
-        ideaId: idea.id,
-        fromItemId: link.direction === 'in' ? other : itemId,
-        toItemId: link.direction === 'in' ? itemId : other,
-        type: link.type,
-        author: 'agent',
-        note: link.note ?? null,
-        runId,
-      });
-    }
-    // Every extracted item traces back to the captured idea, directly or via its parent.
-    const hasParent = item.links.some((l) => l.type === 'derived_from' && l.direction === 'out');
-    if (pass === 'extract' && !hasParent)
-      await createRelation(trx, {
-        ideaId: idea.id,
-        fromItemId: itemId,
-        toItemId: root.id,
-        type: 'derived_from',
-        author: 'agent',
-        runId,
-      });
-    if (item.is_tangent)
-      await recordDecision(trx, {
-        itemId,
-        type: 'mark_tangent',
-        author: 'agent',
-        rationale: 'Set aside by the Explorer as interesting but off the main line.',
-        runId,
-      });
-  }
-  return keyToId;
-}
-
-async function applyFlags(
-  trx: Trx,
-  ideaId: string,
-  runId: string,
-  flags: EpistemicOutput['flags'],
+  options: PassOptions = {},
 ): Promise<void> {
-  const existing = await existingItemIds(trx, ideaId);
-  for (const flag of flags) {
-    if (!existing.has(flag.item))
-      throw invalid(`Model output flags an unknown item "${flag.item}".`);
-    const item = await trx
-      .selectFrom('reasoning_items')
-      .select('status')
-      .where('id', '=', flag.item)
-      .executeTakeFirstOrThrow();
-    if (item.status !== 'open') continue; // never override a decision the user has made
-    await recordDecision(trx, {
-      itemId: flag.item,
-      type: 'flag_needs_user',
-      author: 'agent',
-      rationale: flag.note ?? null,
-      attentionReason: flag.reason,
-      runId,
-    });
-  }
-}
-
-async function applyEpistemic(trx: Trx, idea: IdeasTable, runId: string, out: EpistemicOutput) {
-  const existing = await existingItemIds(trx, idea.id);
-  for (const a of out.assessments) {
-    if (!existing.has(a.item)) throw invalid(`Model output assesses an unknown item "${a.item}".`);
-    await recordAssessment(trx, {
-      itemId: a.item,
-      verdict: a.verdict,
-      rationale: a.rationale,
-      author: 'agent',
-      runId,
-    });
-  }
-  const keyToId = await applyNewItems(trx, idea, runId, 'epistemic', out.corrections);
-  const resolve = resolver(existing, keyToId);
-  for (const e of out.evidence) {
-    const about = resolve(e.about);
-    const row = await createItem(trx, {
-      idea,
-      kind: 'evidence',
-      origin: 'agent',
-      text: e.text,
-      runId,
-      runKey: e.key,
-      via: 'epistemic',
-    });
-    await trx
-      .insertInto('evidence_details')
-      .values({
-        item_id: row.id,
-        source_title: e.source_title,
-        url: e.url ?? null,
-        excerpt: e.excerpt ?? null,
-        created_at: nowIso(),
-      })
-      .execute();
-    await createRelation(trx, {
-      ideaId: idea.id,
-      fromItemId: row.id,
-      toItemId: about,
-      type: e.stance === 'for' ? 'evidence_for' : 'evidence_against',
-      author: 'agent',
-      runId,
-    });
-    await logEvent(trx, {
-      ideaId: idea.id,
-      itemId: about,
-      type: 'evidence.attached',
-      actor: 'agent',
-      runId,
-      payload: { evidenceItemId: row.id, stance: e.stance, sourceTitle: e.source_title },
-    });
-  }
-  await applyFlags(trx, idea.id, runId, out.flags);
-}
-
-async function completedPasses(ctx: AppContext, ideaId: string): Promise<Set<Pass>> {
-  const rows = await ctx.db
-    .selectFrom('analysis_runs')
-    .select('pass')
-    .where('idea_id', '=', ideaId)
-    .where('status', '=', 'completed')
-    .execute();
-  return new Set(rows.map((r) => r.pass));
-}
-
-/**
- * Steps 2-5. Resumable: if an earlier attempt failed part-way, passes that already
- * completed are not repeated.
- */
-export async function runAnalysis(ctx: AppContext, ideaId: string): Promise<void> {
   await withIdeaLock(ideaId, async () => {
     const idea = await requireIdea(ctx.db, ideaId);
     if (idea.stage !== 'captured' && idea.stage !== 'guided')
       throw conflict('This idea has already been analysed. Continue with the review.');
-    const done = await completedPasses(ctx, ideaId);
-
-    for (const pass of ANALYSIS_PASS_ORDER) {
-      if (done.has(pass)) continue;
-      const snapshot = await buildSnapshot(ctx.db, ideaId);
-      switch (pass) {
-        case 'extract':
-          await executePass(
-            ctx,
-            ideaId,
-            analysisRequests.extract(snapshot),
-            (trx, out: ExtractOutput, runId) =>
-              applyNewItems(trx, idea, runId, 'extract', out.items),
-          );
-          break;
-        case 'explore':
-          await executePass(
-            ctx,
-            ideaId,
-            analysisRequests.explore(snapshot),
-            (trx, out: ExploreOutput, runId) =>
-              applyNewItems(trx, idea, runId, 'explore', out.items),
-          );
-          break;
-        case 'epistemic':
-          await executePass(
-            ctx,
-            ideaId,
-            analysisRequests.epistemic(snapshot),
-            (trx, out: EpistemicOutput, runId) => applyEpistemic(trx, idea, runId, out),
-          );
-          break;
-        case 'adversarial':
-          await executePass(
-            ctx,
-            ideaId,
-            analysisRequests.adversarial(snapshot),
-            async (trx, out: AdversarialOutput, runId) => {
-              await applyNewItems(trx, idea, runId, 'adversarial', out.items);
-              await applyFlags(trx, idea.id, runId, out.flags);
-            },
-          );
-          break;
-      }
+    for (;;) {
+      const pass = await nextWorkflowPass(ctx.db, ideaId);
+      if (pass === 'builder' || pass === 'synthesize') break;
+      await runPass(ctx, ideaId, pass, options);
     }
-    await ctx.db.transaction().execute((trx) => setStage(trx, ideaId, idea.stage, 'in_review'));
   });
 }
 
-const GATE_BLOCKED = (n: number) =>
-  `${n} item(s) still need your input. Review them first, or proceed anyway.`;
-
-async function currentGate(db: DbOrTrx, ideaId: string) {
-  const items = await db
-    .selectFrom('reasoning_items')
-    .select(['id', 'status', 'kind'])
-    .where('idea_id', '=', ideaId)
-    .execute();
-  return evaluateReviewGate(items);
-}
-
-async function applySynthesis(
-  trx: Trx,
-  idea: IdeasTable,
-  runId: string,
-  out: SynthesizeOutput,
-  force: boolean,
-): Promise<void> {
-  // The gate is decided here, in the transaction that commits the synthesis, so nothing
-  // that started needing the user while the model was thinking can be skipped silently,
-  // and an override is only ever recorded for a synthesis that actually happened.
-  const gate = await currentGate(trx, idea.id);
-  if (!gate.canProceed) {
-    if (!force) throw conflict(GATE_BLOCKED(gate.blockingItemIds.length));
-    await logEvent(trx, {
-      ideaId: idea.id,
-      type: 'gate.overridden',
-      actor: 'user',
-      runId,
-      payload: { blockingItemIds: gate.blockingItemIds },
-    });
-  }
-
-  const existing = await existingItemIds(trx, idea.id);
-  const lines = [
-    out.initial_thought,
-    ...out.what_changed,
-    ...out.rejected,
-    ...out.uncertain,
-    ...out.conclusions,
-    ...out.evidence,
-    ...out.open_questions,
-  ];
-  for (const ref of [...lines.flatMap((l) => l.refs), ...out.tangents.map((t) => t.item)])
-    if (!existing.has(ref)) throw invalid(`Synthesis refers to an unknown item "${ref}".`);
-
-  // Retire the previous synthesis and any of its conclusions the user has not ruled on.
-  const previous = await trx
-    .selectFrom('syntheses')
-    .select(['item_id', 'version'])
-    .where('idea_id', '=', idea.id)
-    .orderBy('version', 'desc')
-    .executeTakeFirst();
-
-  const synthesisItem = await createItem(trx, {
-    idea,
-    kind: 'synthesis',
-    origin: 'agent',
-    text: out.statement,
-    runId,
-    via: 'synthesize',
-  });
-
-  if (previous) {
-    const stale = await trx
-      .selectFrom('relations')
-      .innerJoin('reasoning_items', 'reasoning_items.id', 'relations.from_item_id')
-      .select('reasoning_items.id')
-      .where('relations.to_item_id', '=', previous.item_id)
-      .where('relations.type', '=', 'synthesized_into')
-      .where('reasoning_items.kind', '=', 'conclusion')
-      .where('reasoning_items.status', '=', 'open')
-      .execute();
-    const previousItem = await trx
-      .selectFrom('reasoning_items')
-      .select('status')
-      .where('id', '=', previous.item_id)
-      .executeTakeFirstOrThrow();
-    // Defensive: never let an already-retired record wedge the next version.
-    const toRetire = previousItem.status === 'superseded' ? [] : [previous.item_id];
-    for (const id of [...toRetire, ...stale.map((s) => s.id)])
-      await recordDecision(trx, {
-        itemId: id,
-        type: 'supersede',
-        author: 'agent',
-        rationale: `Superseded by synthesis v${previous.version + 1}.`,
-        relatedItemIds: [synthesisItem.id],
-        runId,
-      });
-    await createRelation(trx, {
-      ideaId: idea.id,
-      fromItemId: synthesisItem.id,
-      toItemId: previous.item_id,
-      type: 'supersedes',
-      author: 'agent',
-      runId,
-    });
-  }
-
-  const conclusions: SynthesisBodyDto['conclusions'] = [];
-  for (const c of out.conclusions) {
-    const item = await createItem(trx, {
-      idea,
-      kind: 'conclusion',
-      origin: 'agent',
-      text: c.text,
-      runId,
-      runKey: c.key,
-      via: 'synthesize',
-    });
-    for (const ref of new Set(c.refs))
-      await createRelation(trx, {
-        ideaId: idea.id,
-        fromItemId: ref,
-        toItemId: item.id,
-        type: 'synthesized_into',
-        author: 'agent',
-        runId,
-      });
-    await createRelation(trx, {
-      ideaId: idea.id,
-      fromItemId: item.id,
-      toItemId: synthesisItem.id,
-      type: 'synthesized_into',
-      author: 'agent',
-      runId,
-    });
-    conclusions.push({ text: c.text, refs: c.refs, itemId: item.id, confidence: c.confidence });
-  }
-  if (conclusions.length === 0)
-    for (const ref of new Set(out.initial_thought.refs))
-      await createRelation(trx, {
-        ideaId: idea.id,
-        fromItemId: ref,
-        toItemId: synthesisItem.id,
-        type: 'synthesized_into',
-        author: 'agent',
-        runId,
-      });
-
-  // Step 8 - tangent archive. Only items the user has not ruled on are set aside.
-  const archivedTangents: SynthesisBodyDto['archivedTangents'] = [];
-  for (const t of out.tangents) {
-    const item = await trx
-      .selectFrom('reasoning_items')
-      .select(['status', 'kind'])
-      .where('id', '=', t.item)
-      .executeTakeFirstOrThrow();
-    if (item.status !== 'open' || item.kind === 'original_idea') continue;
-    await recordDecision(trx, {
-      itemId: t.item,
-      type: 'mark_tangent',
-      author: 'agent',
-      rationale: t.reason,
-      runId,
-    });
-    archivedTangents.push({ itemId: t.item, reason: t.reason });
-  }
-
-  const body: SynthesisBodyDto = {
-    statement: out.statement,
-    initialThought: out.initial_thought,
-    whatChanged: out.what_changed,
-    rejected: out.rejected,
-    uncertain: out.uncertain,
-    conclusions,
-    evidence: out.evidence,
-    openQuestions: out.open_questions,
-    archivedTangents,
-  };
-  const version = (previous?.version ?? 0) + 1;
-  await trx
-    .insertInto('syntheses')
-    .values({
-      id: newId('syn'),
-      idea_id: idea.id,
-      item_id: synthesisItem.id,
-      version,
-      run_id: runId,
-      body_json: JSON.stringify(body),
-      created_at: nowIso(),
-    })
-    .execute();
-  await logEvent(trx, {
-    ideaId: idea.id,
-    itemId: synthesisItem.id,
-    type: 'synthesis.created',
-    actor: 'agent',
-    runId,
-    payload: {
-      version,
-      conclusions: conclusions.length,
-      archivedTangents: archivedTangents.length,
-    },
-  });
-  await setStage(trx, idea.id, idea.stage, 'synthesized');
+/** Synthesis only makes sense once Steps 2-5 have produced something to review. */
+export async function assertSynthesisStage(db: Db, ideaId: string): Promise<void> {
+  const idea = await requireIdea(db, ideaId);
+  if (idea.stage !== 'in_review' && idea.stage !== 'synthesized')
+    throw conflict('Run the analysis (Steps 2-5) before building a synthesis.');
 }
 
 /**
- * Steps 6-8. Refuses to run while items still need the user, unless `force` is set, in
- * which case the override is itself recorded in the history.
+ * Steps 6-8. Refuses to run while items still need the user, unless the user overrides
+ * for exactly those items; the override is recorded with the synthesis it authorised.
  */
 export async function runSynthesis(
   ctx: AppContext,
   ideaId: string,
-  options: { force?: boolean } = {},
+  options: PassOptions = {},
 ): Promise<void> {
   await withIdeaLock(ideaId, async () => {
-    const idea = await requireIdea(ctx.db, ideaId);
-    if (idea.stage !== 'in_review' && idea.stage !== 'synthesized')
-      throw conflict('Run the analysis (Steps 2-5) before building a synthesis.');
-    const force = Boolean(options.force);
-    // Early check so a blocked gate costs no model calls. The binding check is in applySynthesis.
-    const gate = await currentGate(ctx.db, ideaId);
-    if (!gate.canProceed && !force) throw conflict(GATE_BLOCKED(gate.blockingItemIds.length));
-
-    // Resumable: if the Builder already ran since the last synthesis (i.e. an earlier
-    // attempt failed at the synthesis step), do not run it again and pile up duplicates.
-    const lastRun = async (pass: Pass) =>
-      (
-        await ctx.db
-          .selectFrom('analysis_runs')
-          .select((eb) => eb.fn.max('id').as('id'))
-          .where('idea_id', '=', ideaId)
-          .where('pass', '=', pass)
-          .where('status', '=', 'completed')
-          .executeTakeFirst()
-      )?.id ?? '';
-    const [lastBuilder, lastSynthesis] = await Promise.all([
-      lastRun('builder'),
-      lastRun('synthesize'),
-    ]);
-    if (lastBuilder <= lastSynthesis)
-      await executePass(
-        ctx,
-        ideaId,
-        analysisRequests.builder(await buildSnapshot(ctx.db, ideaId)),
-        (trx, out: BuilderOutput, runId) => applyNewItems(trx, idea, runId, 'builder', out.items),
-      );
-    await executePass(
-      ctx,
-      ideaId,
-      analysisRequests.synthesize(await buildSnapshot(ctx.db, ideaId)),
-      (trx, out: SynthesizeOutput, runId) => applySynthesis(trx, idea, runId, out, force),
-    );
+    await assertSynthesisStage(ctx.db, ideaId);
+    if ((await nextWorkflowPass(ctx.db, ideaId)) === 'builder')
+      await runPass(ctx, ideaId, 'builder', options);
+    await runPass(ctx, ideaId, 'synthesize', options);
   });
 }

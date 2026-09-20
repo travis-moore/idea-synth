@@ -21,7 +21,10 @@ import type {
   SynthesisDto,
 } from '../api-types';
 import type { IdeaSnapshot } from '../ai/passes';
-import type { DbOrTrx, IdeasTable, RelationsTable } from '../db/schema';
+import type { Selectable } from 'kysely';
+import type { DbOrTrx, EventsTable, IdeasTable, RelationsTable } from '../db/schema';
+
+type EventsRow = Selectable<EventsTable>;
 import { notFound } from '../domain/errors';
 import { evaluateReviewGate, premiseFailed, productiveDescendants } from '../domain/rules';
 import { UNRESOLVED_STATUSES, type ItemStatus } from '../domain/vocabulary';
@@ -147,6 +150,9 @@ export async function buildSnapshot(db: DbOrTrx, ideaId: string): Promise<IdeaSn
       toItemId: r.to_item_id,
       type: r.type,
     })),
+    // Read BEFORE the items (requireIdea ran first): if anything changes in between, the
+    // version is older than the data and the commit is refused. Never the other way round.
+    inputVersion: Number(idea.revision),
   };
 }
 
@@ -171,6 +177,7 @@ async function summarise(db: DbOrTrx, idea: IdeasTable): Promise<IdeaSummaryDto>
     sourceItemId: idea.source_item_id,
     sourceIdeaId: idea.source_idea_id,
     createdAt: idea.created_at,
+    revision: Number(idea.revision),
     counts: {
       items: counts.reduce((sum, c) => sum + Number(c.n), 0),
       needsUser: n('needs_user'),
@@ -381,6 +388,8 @@ export async function getItemDetail(db: DbOrTrx, itemId: string): Promise<ItemDe
       qualification: d.qualification,
       relatedItemIds: JSON.parse(d.related_item_ids) as string[],
       createdAt: d.created_at,
+      relayedBy: d.relayed_by,
+      userInstruction: d.user_instruction,
     })),
     assessments: assessments.map((a): AssessmentDto => ({
       id: a.id,
@@ -391,15 +400,37 @@ export async function getItemDetail(db: DbOrTrx, itemId: string): Promise<ItemDe
     })),
     evidence,
     links,
-    events: events.map((e): EventDto => ({
+    events: await toEventDtos(db, events),
+  };
+}
+
+/** Events with the operation envelope they belong to (who executed it, through what). */
+async function toEventDtos(db: DbOrTrx, events: EventsRow[]): Promise<EventDto[]> {
+  const ids = [...new Set(events.flatMap((e) => (e.operation_id ? [e.operation_id] : [])))];
+  const operations = ids.length
+    ? await db.selectFrom('operations').selectAll().where('id', 'in', ids).execute()
+    : [];
+  const byId = new Map(operations.map((o) => [o.id, o]));
+  return events.map((e) => {
+    const op = e.operation_id ? byId.get(e.operation_id) : undefined;
+    return {
       seq: e.seq,
       type: e.type,
       actor: e.actor,
       itemId: e.item_id,
       payload: JSON.parse(e.payload_json) as Record<string, unknown>,
       createdAt: e.created_at,
-    })),
-  };
+      operation: op
+        ? {
+            client: op.client,
+            executedBy: op.executed_by,
+            agentName: op.agent_name,
+            clientSession: op.client_session,
+            userInstruction: op.user_instruction,
+          }
+        : null,
+    };
+  });
 }
 
 export async function listIdeaEvents(db: DbOrTrx, ideaId: string): Promise<EventDto[]> {
@@ -410,14 +441,7 @@ export async function listIdeaEvents(db: DbOrTrx, ideaId: string): Promise<Event
     .where('idea_id', '=', ideaId)
     .orderBy('seq')
     .execute();
-  return events.map((e) => ({
-    seq: e.seq,
-    type: e.type,
-    actor: e.actor,
-    itemId: e.item_id,
-    payload: JSON.parse(e.payload_json) as Record<string, unknown>,
-    createdAt: e.created_at,
-  }));
+  return toEventDtos(db, events);
 }
 
 export async function listRuns(db: DbOrTrx, ideaId: string): Promise<RunDto[]> {
@@ -438,6 +462,9 @@ export async function listRuns(db: DbOrTrx, ideaId: string): Promise<RunDto[]> {
     error: r.error,
     startedAt: r.started_at,
     finishedAt: r.finished_at,
+    inputVersion: r.input_version,
+    modelSource: r.model_source,
+    authMode: r.auth_mode,
   }));
 }
 

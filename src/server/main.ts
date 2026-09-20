@@ -1,9 +1,12 @@
+import { dirname, join, relative } from 'node:path';
 import { serve } from '@hono/node-server';
 import { createProvider } from '../ai';
-import { dbPath, loadEnv, port } from '../config';
+import { dbPath, host, loadEnv, port, REPO_ROOT } from '../config';
 import { migrateToLatest, openDb } from '../db/client';
 import { isEmpty, seedDemo } from '../seed/demo';
+import { JobRunner } from '../services/jobs';
 import { createApp } from './app';
+import { loadOrCreateToken, localSecurity } from './security';
 
 loadEnv();
 
@@ -18,10 +21,38 @@ if (process.env.IDEA_SYNTH_SEED !== 'off' && (await isEmpty(db))) {
 }
 
 const provider = createProvider();
-const app = createApp({ db, provider }, { staticDir: './web/dist' });
-
-serve({ fetch: app.fetch, port: port() }, (info) => {
-  console.log(
-    `Idea Synth API on http://localhost:${info.port}  (provider: ${provider.name}${provider.live ? '' : ', demo mode'})`,
-  );
+const ctx = { db, provider };
+const runner = new JobRunner(ctx, {
+  concurrency: Number(process.env.IDEA_SYNTH_JOB_CONCURRENCY ?? 2),
 });
+const resumed = await runner.recover();
+if (resumed) console.log(`Recovered ${resumed} job(s) interrupted by the last shutdown.`);
+runner.start();
+
+const tokenFile =
+  dbPath() === ':memory:'
+    ? join(REPO_ROOT, 'data', '.api-token')
+    : join(dirname(dbPath()), '.api-token');
+const security = localSecurity(loadOrCreateToken(tokenFile), port());
+const app = createApp(ctx, {
+  staticDir: relative(process.cwd(), join(REPO_ROOT, 'web/dist')) || '.',
+  security,
+  runner,
+});
+
+const server = serve({ fetch: app.fetch, port: port(), hostname: host() }, (info) => {
+  console.log(`Idea Synth on http://${host()}:${info.port}  -  ${provider.status()}`);
+  if (host() !== '127.0.0.1' && host() !== 'localhost' && host() !== '::1')
+    console.warn(
+      'WARNING: HOST is not loopback. This service has no user accounts; do not expose it.',
+    );
+});
+
+const shutdown = async () => {
+  server.close();
+  await runner.stop();
+  await db.destroy();
+  process.exit(0);
+};
+process.on('SIGINT', () => void shutdown());
+process.on('SIGTERM', () => void shutdown());

@@ -10,7 +10,13 @@
  */
 import Anthropic from '@anthropic-ai/sdk';
 import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
-import { ProviderError, type ModelProvider, type StructuredRequest } from '../provider';
+import {
+  ProviderError,
+  type GenerateOptions,
+  type ModelProvider,
+  type ProviderInfo,
+  type StructuredRequest,
+} from '../provider';
 
 export const DEFAULT_ANTHROPIC_MODEL = 'claude-opus-5';
 
@@ -20,6 +26,7 @@ export type AnthropicMessagesClient = { messages: Pick<Anthropic['messages'], 'c
 export class AnthropicProvider implements ModelProvider {
   readonly name = 'anthropic';
   readonly live = true;
+  readonly canReason = true;
   readonly model: string;
   private readonly client: AnthropicMessagesClient;
 
@@ -28,16 +35,31 @@ export class AnthropicProvider implements ModelProvider {
     this.client = options.client ?? new Anthropic();
   }
 
-  async generate<T>(request: StructuredRequest<T>): Promise<unknown> {
+  status(): string {
+    return `Anthropic API (${this.model}), billed to the configured API credentials`;
+  }
+
+  /** This provider bills an API key (or whatever credential the SDK resolves); it says so. */
+  info(): ProviderInfo {
+    return { name: this.name, model: this.model, modelSource: 'provider', authMode: 'api_key' };
+  }
+
+  async generate<T>(
+    request: StructuredRequest<T>,
+    options: GenerateOptions = {},
+  ): Promise<unknown> {
     let response: Anthropic.Message;
     try {
-      response = await this.client.messages.create({
-        model: this.model,
-        max_tokens: 16000,
-        system: request.system,
-        messages: [{ role: 'user', content: request.prompt }],
-        output_config: { format: zodOutputFormat(request.schema) },
-      });
+      response = await this.client.messages.create(
+        {
+          model: this.model,
+          max_tokens: 16000,
+          system: request.system,
+          messages: [{ role: 'user', content: request.prompt }],
+          output_config: { format: zodOutputFormat(request.schema) },
+        },
+        { signal: options.signal },
+      );
     } catch (error) {
       if (error instanceof Anthropic.AuthenticationError)
         throw new ProviderError('Anthropic rejected the credentials. Check ANTHROPIC_API_KEY.', {

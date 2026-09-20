@@ -1,24 +1,23 @@
 import { describe, expect, it } from 'vitest';
-import { MockProvider, type ModelProvider, type StructuredRequest } from '../src/ai';
+import type { StructuredRequest } from '../src/ai';
 import { openTestDb } from '../src/db/client';
 import { ANALYSIS_PASS_ORDER, ROLE_OF_PASS } from '../src/domain/vocabulary';
 import { captureIdea } from '../src/services/ideas';
 import { runAnalysis, runSynthesis } from '../src/services/pipeline';
 import { getIdea, getSynthesis, listIdeaItems, listRuns } from '../src/services/queries';
-import { PYRAMIDS_TEXT, testContext } from './helpers';
+import { overrideAll, PYRAMIDS_TEXT, testContext, TestProvider } from './helpers';
 
 /** Wraps the mock, replacing the output of one pass. */
-class TamperingProvider implements ModelProvider {
-  readonly name = 'tampering';
-  readonly model = 'test';
-  readonly live = false;
-  private readonly inner = new MockProvider();
+class TamperingProvider extends TestProvider {
+  override readonly name = 'tampering';
   constructor(
     private readonly pass: string,
     private readonly tamper: (output: unknown) => unknown,
     public enabled = true,
-  ) {}
-  async generate<T>(request: StructuredRequest<T>): Promise<unknown> {
+  ) {
+    super();
+  }
+  override async generate<T>(request: StructuredRequest<T>): Promise<unknown> {
     const output = await this.inner.generate(request);
     return this.enabled && request.pass === this.pass ? this.tamper(output) : output;
   }
@@ -109,7 +108,7 @@ describe('structured output is validated before anything is written', () => {
     const ctx = { db: await openTestDb(), provider };
     const idea = await captureIdea(ctx.db, { text: PYRAMIDS_TEXT });
     await runAnalysis(ctx, idea.id);
-    await expect(runSynthesis(ctx, idea.id, { force: true })).rejects.toThrow(
+    await expect(runSynthesis(ctx, idea.id, await overrideAll(ctx, idea.id))).rejects.toThrow(
       /synthesize pass failed/,
     );
     expect(await getSynthesis(ctx.db, idea.id)).toBeNull();
@@ -135,7 +134,7 @@ describe('the mock handles arbitrary ideas', () => {
       status: 'needs_user',
       attentionReason: 'value_judgment_input',
     });
-    await runSynthesis(ctx, idea.id, { force: true });
+    await runSynthesis(ctx, idea.id, await overrideAll(ctx, idea.id));
     const synthesis = (await getSynthesis(ctx.db, idea.id))!;
     // Nothing accepted yet, so the mock must not manufacture certainty.
     expect(synthesis.body.statement).toMatch(/No items have been accepted yet/);

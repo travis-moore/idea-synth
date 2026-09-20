@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
 import { z } from 'zod';
-import { createProvider, MockProvider } from '../src/ai';
+import { createProvider, MockProvider, NoProvider } from '../src/ai';
 import { analysisRequests } from '../src/ai/passes';
 import * as passSchemas from '../src/ai/schemas';
 import { AnthropicProvider, type AnthropicMessagesClient } from '../src/ai/providers/anthropic';
@@ -32,8 +32,12 @@ function fakeClient(
 }
 
 describe('provider selection', () => {
-  it('defaults to the mock so the app runs with no credentials', () => {
-    expect(createProvider({})).toBeInstanceOf(MockProvider);
+  it('defaults to viewer mode: nothing is called, billed or required', () => {
+    const none = createProvider({});
+    expect(none).toBeInstanceOf(NoProvider);
+    expect(none.canReason).toBe(false);
+    expect(createProvider({ IDEA_SYNTH_PROVIDER: 'mock' })).toBeInstanceOf(MockProvider);
+    expect(createProvider({ IDEA_SYNTH_PROVIDER: 'claude-cli' }).name).toBe('claude-code-cli');
     expect(() => createProvider({ IDEA_SYNTH_PROVIDER: 'skynet' })).toThrow(/Unknown/);
   });
 });
@@ -49,6 +53,7 @@ describe('mock provider', () => {
       },
       items: [],
       relations: [],
+      inputVersion: 0,
     };
     const mock = new MockProvider();
     const [a, b] = await Promise.all([

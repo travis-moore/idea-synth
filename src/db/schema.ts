@@ -37,6 +37,8 @@ export interface IdeasTable {
   /** For promoted tangents: the item (in another idea) this idea grew from. */
   source_item_id: string | null;
   source_idea_id: string | null;
+  /** Input version: bumped by every change to this idea's reasoning state. */
+  revision: number;
   created_at: string;
   updated_at: string;
 }
@@ -48,12 +50,20 @@ export interface AnalysisRunsTable {
   provider: string;
   model: string;
   prompt_version: string;
-  status: 'completed' | 'failed';
+  /** `stale`: valid output that was NOT applied because its input had changed. */
+  status: 'completed' | 'failed' | 'stale';
   input_json: string;
   output_json: string | null;
   error: string | null;
   started_at: string;
   finished_at: string;
+  /** The idea revision the pass input was read at. */
+  input_version: number | null;
+  operation_id: string | null;
+  /** How we know the model name: reported by a provider/CLI, or merely claimed by an agent. */
+  model_source: 'provider' | 'cli_reported' | 'self_reported' | null;
+  /** e.g. `none` (mock), `api_key`, `subscription:max`, `external_session`. Never a secret. */
+  auth_mode: string | null;
 }
 
 export interface ReasoningItemsTable {
@@ -134,6 +144,9 @@ export interface DecisionsTable {
   /** JSON array of item ids produced by / involved in the decision (split children, merge target). */
   related_item_ids: string;
   created_at: string;
+  /** Set when an agent relayed the user's decision; the user's supporting words follow. */
+  relayed_by: string | null;
+  user_instruction: string | null;
 }
 
 export interface AssessmentsTable {
@@ -201,6 +214,8 @@ export interface GuidedStepsTable {
   item_id: string | null;
   run_id: string | null;
   created_at: string;
+  /** For `feedback` steps: the answer step this assessment is about. */
+  responds_to_step_id: string | null;
 }
 
 export interface EventsTable {
@@ -212,6 +227,53 @@ export interface EventsTable {
   payload_json: string;
   run_id: string | null;
   created_at: string;
+  operation_id: string | null;
+}
+
+/** Append-only envelope for every operation a client performs. See migration 0002. */
+export interface OperationsTable {
+  id: string;
+  request_id: string | null;
+  idea_id: string | null;
+  name: string;
+  status: 'applied' | 'rejected';
+  rejection_code: string | null;
+  error: string | null;
+  client: string;
+  client_session: string | null;
+  executed_by: Actor;
+  agent_name: string | null;
+  agent_model: string | null;
+  contract_version: string | null;
+  user_instruction: string | null;
+  input_version: number | null;
+  result_json: string | null;
+  created_at: string;
+}
+
+export type JobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
+export type JobKind = 'analyze' | 'synthesize' | 'discuss_reply' | 'guided_turn' | 'guided_handoff';
+
+/** MUTABLE work queue. Not reasoning history: nothing here is provenance. */
+export interface JobsTable {
+  id: string;
+  idea_id: string;
+  kind: JobKind;
+  payload_json: string;
+  status: JobStatus;
+  progress: string | null;
+  error_code: string | null;
+  error: string | null;
+  request_id: string | null;
+  attempts: Generated<number>;
+  timeout_ms: number;
+  cancel_requested: Generated<number>;
+  worker_id: string | null;
+  heartbeat_at: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  updated_at: string;
 }
 
 export interface Database {
@@ -230,6 +292,8 @@ export interface Database {
   guided_sessions: GuidedSessionsTable;
   guided_steps: GuidedStepsTable;
   events: EventsTable;
+  operations: OperationsTable;
+  jobs: JobsTable;
 }
 
 export type Db = Kysely<Database>;
@@ -249,4 +313,5 @@ export const APPEND_ONLY_TABLES = [
   'syntheses',
   'guided_steps',
   'events',
+  'operations',
 ] as const;

@@ -53,6 +53,7 @@ export async function captureIdea(db: DbOrTrx, input: CaptureInput): Promise<Ide
       stage: input.stage ?? 'captured',
       source_item_id: input.sourceItemId ?? null,
       source_idea_id: input.sourceIdeaId ?? null,
+      revision: 0,
       created_at: now,
       updated_at: now,
     };
@@ -60,7 +61,7 @@ export async function captureIdea(db: DbOrTrx, input: CaptureInput): Promise<Ide
     await logEvent(trx, {
       ideaId: idea.id,
       type: 'idea.captured',
-      actor: 'user',
+      actor: (input.rootOrigin ?? 'user') === 'user' ? 'user' : 'agent',
       payload: { source: idea.source, rootOrigin: input.rootOrigin ?? 'user' },
     });
     await createItem(trx, {
@@ -82,6 +83,13 @@ export async function setStage(db: DbOrTrx, ideaId: string, from: IdeaStage, to:
     .set({ stage: to, updated_at: nowIso() })
     .where('id', '=', ideaId)
     .execute();
+  // A guided session is over once its idea enters the normal workflow, whoever drove it.
+  if (from === 'guided')
+    await db
+      .updateTable('guided_sessions')
+      .set({ status: 'handed_off', updated_at: nowIso() })
+      .where('idea_id', '=', ideaId)
+      .execute();
   await logEvent(db, {
     ideaId,
     type: 'idea.stage_changed',

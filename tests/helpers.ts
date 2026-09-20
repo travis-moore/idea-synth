@@ -1,4 +1,5 @@
-import { MockProvider } from '../src/ai';
+import { MockProvider, type ModelProvider, type StructuredRequest } from '../src/ai';
+import type { ProviderInfo } from '../src/ai/provider';
 import { PYRAMIDS_TEXT } from '../src/ai/mock/pyramids';
 import { openTestDb } from '../src/db/client';
 import type { AppContext } from '../src/services/context';
@@ -30,4 +31,38 @@ export async function itemByKey(ctx: AppContext, ideaId: string, key: string) {
     .executeTakeFirstOrThrow();
   const dto = (await listIdeaItems(ctx.db, ideaId)).find((i) => i.id === row.id)!;
   return dto;
+}
+
+/** Base for test doubles: behaves like the mock unless `generate` is overridden. */
+export class TestProvider implements ModelProvider {
+  readonly name: string = 'test-double';
+  readonly model = 'test';
+  readonly live = false;
+  readonly canReason = true;
+  status(): string {
+    return 'test double';
+  }
+  protected readonly inner = new MockProvider();
+  info(): ProviderInfo {
+    return { name: this.name, model: this.model, modelSource: 'provider', authMode: 'none' };
+  }
+  generate<T>(request: StructuredRequest<T>): Promise<unknown> {
+    return this.inner.generate(request);
+  }
+}
+
+/** A provider from a plain function, for one-off racing/failing scenarios. */
+export function providerFrom(
+  generate: (request: StructuredRequest<unknown>, fallback: MockProvider) => Promise<unknown>,
+): ModelProvider {
+  const fallback = new MockProvider();
+  return Object.assign(new TestProvider(), {
+    generate: (request: StructuredRequest<unknown>) => generate(request, fallback),
+  }) as ModelProvider;
+}
+
+/** The override a user gives after looking at everything currently blocking the gate. */
+export async function overrideAll(ctx: AppContext, ideaId: string) {
+  const { listInbox } = await import('../src/services/queries');
+  return { override: { blockingItemIds: (await listInbox(ctx.db, ideaId)).map((i) => i.id) } };
 }

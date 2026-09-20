@@ -52,6 +52,8 @@ export interface IdeaSnapshot {
   };
   items: ItemSnapshot[];
   relations: Array<{ fromItemId: string; toItemId: string; type: RelationType }>;
+  /** The idea revision this snapshot was read at. Echoed back when committing output. */
+  inputVersion: number;
 }
 
 const PHILOSOPHY = `You are one reasoning pass inside Idea Synth, a tool that scaffolds a human's thinking

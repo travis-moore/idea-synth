@@ -246,6 +246,7 @@ export const EVENT_TYPES = [
   'run.started',
   'run.completed',
   'run.failed',
+  'run.stale',
   'item.created',
   'item.revised',
   'item.assessed',

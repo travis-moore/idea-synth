@@ -1,4 +1,4 @@
-import type { ModelProvider, StructuredRequest } from '../provider';
+import type { ModelProvider, ProviderInfo, StructuredRequest } from '../provider';
 import { ProviderError } from '../provider';
 import type { DiscussInput, IdeaSnapshot, TutorAssessInput, TutorMoveInput } from '../passes';
 import type { DiscussOutput, EpistemicOutput } from '../schemas';
@@ -68,6 +68,15 @@ export class MockProvider implements ModelProvider {
   readonly name = 'mock';
   readonly model = 'deterministic-mock-1';
   readonly live = false;
+  readonly canReason = true;
+
+  status(): string {
+    return 'deterministic mock: demo data, no model is called';
+  }
+
+  info(): ProviderInfo {
+    return { name: this.name, model: this.model, modelSource: 'provider', authMode: 'none' };
+  }
 
   async generate<T>(request: StructuredRequest<T>): Promise<unknown> {
     const key = `${request.pass}:${request.task}`;

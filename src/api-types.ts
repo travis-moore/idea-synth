@@ -22,10 +22,46 @@ import type {
 } from './domain/vocabulary';
 
 export interface MetaDto {
+  /** "none" = viewer mode: the web UI can inspect and review, but cannot run reasoning. */
   provider: string;
   model: string;
-  /** False in demo mode: AI output is deterministic mock data. */
+  /** False for the mock: AI output is deterministic demo data. */
   live: boolean;
+  /** True when web-triggered reasoning (analysis, synthesis, replies, tutoring) is available. */
+  canReason: boolean;
+  /** How the provider authenticates, e.g. "none", "api_key", "subscription:max". Never a secret. */
+  authMode: string;
+  /** Human-readable status of the provider (e.g. why a local agent is unavailable). */
+  providerStatus: string;
+  contractVersion: string;
+}
+
+/** Cheap change feed the UI polls: one number per idea, plus active jobs. */
+export interface ChangesDto {
+  ideas: Record<string, number>;
+  activeJobs: number;
+}
+
+export type JobStatusDto =
+  'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
+
+/** A unit of web-triggered agent work. Mutable status; not reasoning history. */
+export interface JobDto {
+  id: string;
+  ideaId: string;
+  kind: 'analyze' | 'synthesize' | 'discuss_reply' | 'guided_turn' | 'guided_handoff';
+  status: JobStatusDto;
+  progress: string | null;
+  errorCode: string | null;
+  error: string | null;
+  attempts: number;
+  cancelRequested: boolean;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  /** For item- or session-scoped jobs. */
+  itemId: string | null;
+  sessionId: string | null;
 }
 
 export interface IdeaSummaryDto {
@@ -37,6 +73,8 @@ export interface IdeaSummaryDto {
   sourceItemId: string | null;
   sourceIdeaId: string | null;
   createdAt: string;
+  /** Input version: changes whenever the idea's reasoning state changes. */
+  revision: number;
   counts: { items: number; needsUser: number; open: number; tangents: number };
   guidedSessionId: string | null;
 }
@@ -127,6 +165,9 @@ export interface DecisionDto {
   qualification: string | null;
   relatedItemIds: string[];
   createdAt: string;
+  /** When an agent relayed this decision: who, and the user's own words authorising it. */
+  relayedBy: string | null;
+  userInstruction: string | null;
 }
 
 export interface AssessmentDto {
@@ -152,6 +193,14 @@ export interface EventDto {
   itemId: string | null;
   payload: Record<string, unknown>;
   createdAt: string;
+  /** Which client performed the operation this event belongs to, if recorded. */
+  operation: {
+    client: string;
+    executedBy: Actor;
+    agentName: string | null;
+    clientSession: string | null;
+    userInstruction: string | null;
+  } | null;
 }
 
 export interface LinkedItemDto {
@@ -180,10 +229,14 @@ export interface RunDto {
   provider: string;
   model: string;
   promptVersion: string;
-  status: 'completed' | 'failed';
+  /** `stale`: valid output that was not applied because the idea had changed meanwhile. */
+  status: 'completed' | 'failed' | 'stale';
   error: string | null;
   startedAt: string;
   finishedAt: string;
+  inputVersion: number | null;
+  modelSource: string | null;
+  authMode: string | null;
 }
 
 export interface TracedLineDto {
@@ -238,6 +291,7 @@ export interface GuidedStepDto {
   adequacy: Adequacy | null;
   stance: PremiseStance | null;
   itemId: string | null;
+  respondsToStepId: string | null;
   createdAt: string;
 }
 
@@ -247,13 +301,18 @@ export interface GuidedSessionDto {
   hypothesis: string;
   status: 'active' | 'finished' | 'handed_off';
   level: number;
+  inputVersion: number;
+  /** What the session is waiting for. `assessment` and `move` are owed by a reasoner. */
+  pendingTask: 'answer' | 'assessment' | 'move' | 'premise' | 'none';
+  /** True when the user's answer is stored but has not been assessed yet (retry assessment). */
+  awaitingAssessment: boolean;
   /** True while an agent-supplied premise is waiting for accept / reject / modify. */
   awaitingPremiseResponse: boolean;
-  /** True when the last move failed to arrive and the session can be continued. */
+  /** True when the tutor owes its next move (continue). */
   awaitingTutor: boolean;
   steps: GuidedStepDto[];
 }
 
 export interface ApiErrorDto {
-  error: { code: string; message: string };
+  error: { code: string; message: string; details?: Record<string, unknown> };
 }

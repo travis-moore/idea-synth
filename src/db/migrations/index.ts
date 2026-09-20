@@ -1,5 +1,6 @@
 import type { Migration, MigrationProvider } from 'kysely';
 import * as m0001 from './0001_initial';
+import * as m0002 from './0002_clients_versions_jobs';
 
 /**
  * Migrations are imported statically (not scanned from disk) so they work identically
@@ -8,6 +9,7 @@ import * as m0001 from './0001_initial';
  */
 export const migrations: Record<string, Migration> = {
   '0001_initial': m0001,
+  '0002_clients_versions_jobs': m0002,
 };
 
 export const migrationProvider: MigrationProvider = {
