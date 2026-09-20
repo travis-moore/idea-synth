@@ -25,7 +25,6 @@ of what is missing and what to do next. Keep it current.
 - Analysis runs once per idea. Items the user adds during review (branches, split
   children) are not themselves explored / fact-checked / challenged. An incremental
   "analyse this item" pass is the natural next step.
-- Merge exists in the service layer and API but has no UI.
 - Relations cannot be added by hand in the UI ("this supports that").
 - No retraction of a relation (edges are append-only; a `retracted_by` record would be
   needed, not deletion).
@@ -57,5 +56,6 @@ of what is missing and what to do next. Keep it current.
    Markdown; then use it for the NPO curriculum lesson on "using AI to develop an idea
    without letting it do your thinking for you" (see `.claude/CLAUDE.md` §11).
 
-Smaller: merge UI, manual relations, Playwright smoke test, archive/hide ideas, per-role
+Smaller: a less sprawling map layout for wide ranks, code-splitting the web bundle
+(React Flow makes it ~640 kB), manual relations, Playwright smoke test, archive/hide ideas, per-role
 model routing.

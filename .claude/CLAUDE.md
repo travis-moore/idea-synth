@@ -78,19 +78,19 @@ Full details: `docs/architecture.md`, decision record `docs/adr/0001-stack.md`.
 
 ## 3. Repository structure
 
-| Path               | What lives there                                                                                                                                                             |
-| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/domain/`      | Pure vocabulary (`vocabulary.ts`), rules (`rules.ts`), scaffolding policy (`scaffolding.ts`), ids, errors. No I/O.                                                           |
-| `src/db/`          | Kysely table types (`schema.ts`), migrations (`migrations/`), client, CLI.                                                                                                   |
-| `src/ai/`          | `provider.ts` (interface), `schemas.ts` (zod output contracts), `passes.ts` (prompts + request builders), `mock/` (deterministic provider), `providers/anthropic.ts` (live). |
-| `src/services/`    | `store.ts` (write primitives, always log events), `pipeline.ts` (Steps 2–8), `items.ts` (review operations), `guided.ts`, `queries.ts` (read side → DTOs), `ideas.ts`.       |
-| `src/server/`      | `app.ts` (routes + request validation), `main.ts` (entrypoint).                                                                                                              |
-| `src/seed/`        | Demo data (pyramids idea, robots guided session).                                                                                                                            |
-| `src/api-types.ts` | DTO contract shared by server and web. Types only.                                                                                                                           |
-| `web/`             | Vite + React client. `web/src/graph/layout.ts` is the pure dagre layout.                                                                                                     |
-| `tests/`           | Vitest suites against in-memory SQLite with real migrations.                                                                                                                 |
-| `docs/`            | Architecture, domain model, workflow, guided development, AI providers, development guide, roadmap.                                                                          |
-| `.devops.json`     | Pins the Azure DevOps project for the shared `devops` CLI (no secrets).                                                                                                      |
+| Path               | What lives there                                                                                                                                                                                                                            |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/domain/`      | Pure vocabulary (`vocabulary.ts`), rules (`rules.ts`), scaffolding policy (`scaffolding.ts`), ids, errors. No I/O.                                                                                                                          |
+| `src/db/`          | Kysely table types (`schema.ts`), migrations (`migrations/`), client, CLI.                                                                                                                                                                  |
+| `src/ai/`          | `provider.ts` (interface), `schemas.ts` (zod output contracts), `passes.ts` (prompts + request builders), `mock/` (deterministic provider), `providers/anthropic.ts` (live).                                                                |
+| `src/services/`    | `store.ts` (write primitives, always log events), `pipeline.ts` (Steps 2–8), `items.ts` (review operations), `guided.ts`, `queries.ts` (read side → DTOs), `ideas.ts`.                                                                      |
+| `src/server/`      | `app.ts` (routes + request validation), `main.ts` (entrypoint).                                                                                                                                                                             |
+| `src/seed/`        | Demo data (pyramids idea, robots guided session).                                                                                                                                                                                           |
+| `src/api-types.ts` | DTO contract shared by server and web. Types only.                                                                                                                                                                                          |
+| `web/`             | Vite + React client: `api.ts` (typed client), `queries.ts` (react-query hooks), `labels.ts` (all UI wording for kinds/statuses/origins), `pages/`, `tabs/`, `item/` (item panel sections), `graph/` (`layout.ts` is the pure dagre layout). |
+| `tests/`           | Vitest suites against in-memory SQLite with real migrations.                                                                                                                                                                                |
+| `docs/`            | Architecture, domain model, workflow, guided development, AI providers, development guide, roadmap.                                                                                                                                         |
+| `.devops.json`     | Pins the Azure DevOps project for the shared `devops` CLI (no secrets).                                                                                                                                                                     |
 
 ## 4. How to run
 
