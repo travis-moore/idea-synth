@@ -110,18 +110,19 @@ override is only ever recorded together with the synthesis it authorised.
 
 Possible outcomes for an item:
 
-| Outcome                                               | How                     | Result                                                     |
-| ----------------------------------------------------- | ----------------------- | ---------------------------------------------------------- |
-| remain open                                           | do nothing / `reopen`   | `open`                                                     |
-| require user input                                    | agent `flag_needs_user` | `needs_user`                                               |
-| accepted                                              | `accept`                | `accepted` (into the current reasoning state — not "true") |
-| accepted with qualification                           | `qualify` + text        | `qualified`; the qualification is fed to the Builder       |
-| rejected                                              | `reject`                | `rejected`; thread, decisions and children all remain      |
-| superseded                                            | `supersede`             | old item `superseded`, new item `supersedes` it            |
-| become a tangent                                      | `mark_tangent`          | `tangent`, appears in the Tangent Library                  |
-| merged                                                | merge                   | sources `merged`, each `merged_into` the new item          |
-| split                                                 | split                   | parent `split`, children `derived_from` it                 |
-| produce a hypothesis / correction / research question | branch                  | new child via `branches_to`; parent unchanged              |
+| Outcome                                               | How                          | Result                                                                                                                                                                                     |
+| ----------------------------------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| remain open                                           | do nothing / `reopen`        | `open`                                                                                                                                                                                     |
+| require user input                                    | agent `flag_needs_user`      | `needs_user`                                                                                                                                                                               |
+| accepted                                              | `accept`                     | `accepted` (into the current reasoning state — not "true")                                                                                                                                 |
+| accepted with qualification                           | `qualify` + text             | `qualified`; the qualification is fed to the Builder                                                                                                                                       |
+| answered                                              | `respond` + the user's words | `responded`; for things the agent _asked_ (clarification, value judgement, ambiguity, its own question). The answer goes to the item's thread; no verdict is passed on the agent's wording |
+| rejected                                              | `reject`                     | `rejected`; thread, decisions and children all remain                                                                                                                                      |
+| superseded                                            | `supersede`                  | old item `superseded`, new item `supersedes` it                                                                                                                                            |
+| become a tangent                                      | `mark_tangent`               | `tangent`, appears in the Tangent Library                                                                                                                                                  |
+| merged                                                | merge                        | sources `merged`, each `merged_into` the new item                                                                                                                                          |
+| split                                                 | split                        | parent `split`, children `derived_from` it                                                                                                                                                 |
+| produce a hypothesis / correction / research question | branch                       | new child via `branches_to`; parent unchanged                                                                                                                                              |
 
 **False premise, productive idea.** Not a stored status. An item whose premise failed
 (rejected by the user, or verdict `false` / `probably_false`) gets this label when at least

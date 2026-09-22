@@ -121,8 +121,11 @@ A **tangent** is a status, not a kind: any kind of item can be set aside.
 
 ## Statuses
 
-`open` · `needs_user` · `accepted` · `qualified` · `rejected` · `tangent` · `split` ·
-`merged` · `superseded`. The last three are structural and final (continue with the items
+`open` · `needs_user` · `accepted` · `qualified` · `responded` · `rejected` · `tangent` ·
+`split` · `merged` · `superseded`. `responded` means the user answered something the agent
+asked (attention reasons `clarification_needed`, `value_judgment_input`,
+`ambiguous_interpretation`, or an agent question); unlike `accepted` it says nothing about
+the item's statement. The last three are structural and final (continue with the items
 they produced). Everything else can be reopened. `original_idea` and `synthesis` items are
 records of the process and cannot be accepted or rejected.
 

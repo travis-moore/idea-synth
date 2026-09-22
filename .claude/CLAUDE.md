@@ -55,6 +55,9 @@ The system keeps both, and shows the relationship: **false premise, productive i
    supersede belong to the user (`statusAfterDecision` in `src/domain/rules.ts`).
 7. **"Accepted" never means "true".** It means accepted into the current reasoning state.
    Keep UI copy and prompts consistent with that. Do not manufacture certainty.
+   **Answering is not accepting**: when the agent asks the user something (a clarification,
+   a value judgement, an ambiguity, a question), the reply is a `respond` decision in the
+   user's own words, never an accept/reject of the agent's wording.
 8. **The graph is domain data,** stored in `reasoning_items` + `relations`. UI state is
    never the source of truth for structure or genealogy.
 9. **It is not a chat app.** Conversation attaches to reasoning items. The graph and the
