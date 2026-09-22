@@ -1,6 +1,10 @@
 import { useState } from 'react';
 import type { ItemDto } from '../../../src/api-types';
-import type { DecisionType, ItemStatus } from '../../../src/domain/vocabulary';
+import {
+  QUESTION_REASONS,
+  type DecisionType,
+  type ItemStatus,
+} from '../../../src/domain/vocabulary';
 import { api } from '../api';
 import type { DecisionInput } from '../api';
 import { ErrorNote } from '../components/Feedback';
@@ -39,8 +43,20 @@ const OTHER_CHOICES: readonly Choice[] = [
 
 const STRUCTURAL: readonly ItemStatus[] = ['split', 'merged', 'superseded'];
 
+/**
+ * Did the AI ask the user something (a clarification, a value judgement, an ambiguity, its
+ * own question), or put a claim to them for a verdict? The two need different actions:
+ * answering is not accepting.
+ */
+export function asksForAnswer(item: ItemDto): boolean {
+  if (item.attentionReason && QUESTION_REASONS.includes(item.attentionReason)) return true;
+  return item.kind === 'question' && item.origin === 'agent';
+}
+
 export function DecideSection({ item }: { item: ItemDto }) {
   const [rationale, setRationale] = useState('');
+  const [response, setResponse] = useState('');
+  const [showVerdicts, setShowVerdicts] = useState(false);
   const [qualification, setQualification] = useState('');
   const [qualifying, setQualifying] = useState(false);
   const decide = useAction(
@@ -77,13 +93,71 @@ export function DecideSection({ item }: { item: ItemDto }) {
   const send = (decision: DecisionType) =>
     decide.mutate({
       decision,
-      rationale: rationale.trim() || undefined,
+      rationale: decision === 'respond' ? response : rationale.trim() || undefined,
       qualification: decision === 'qualify' ? qualification.trim() : undefined,
     });
 
+  const question = asksForAnswer(item);
+  if (question && !showVerdicts) {
+    return (
+      <PanelSection title="Respond">
+        <p className="hint">
+          The AI is asking you something here, not putting a claim to you. Your answer, in your own
+          words, resolves it; it is stored exactly as written and passes no verdict on the AI’s
+          wording.
+        </p>
+        <label>
+          Your response
+          <textarea
+            rows={4}
+            value={response}
+            onChange={(e) => setResponse(e.target.value)}
+            placeholder="What do you mean, or what is your view?"
+          />
+        </label>
+        <div className="form-actions">
+          <button
+            type="button"
+            className="primary"
+            disabled={decide.isPending || !response.trim()}
+            onClick={() => {
+              send('respond');
+              setResponse('');
+            }}
+          >
+            Respond
+          </button>
+          <button
+            type="button"
+            className="decide-tangent"
+            disabled={decide.isPending || item.status === 'tangent'}
+            onClick={() => send('mark_tangent')}
+          >
+            Set aside as tangent
+          </button>
+          <button type="button" className="button-link" onClick={() => setShowVerdicts(true)}>
+            I want to accept or reject the AI’s wording instead
+          </button>
+        </div>
+        <ErrorNote error={decide.error} />
+      </PanelSection>
+    );
+  }
+
   return (
     <PanelSection title="Decide">
-      <p className="hint">{ACCEPTED_HINT} Every decision is recorded and can be reopened.</p>
+      <p className="hint">
+        Accept means: <em>this item’s statement enters your current reasoning as it stands</em>. It
+        does not mean it is true. Every decision is recorded and can be reopened.
+        {question && (
+          <>
+            {' '}
+            <button type="button" className="button-link" onClick={() => setShowVerdicts(false)}>
+              Back to responding
+            </button>
+          </>
+        )}
+      </p>
       <label>
         Rationale (optional)
         <textarea

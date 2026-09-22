@@ -459,6 +459,10 @@ label.check > input {
   background: var(--c-qualified-bg);
   color: var(--c-qualified);
 }
+.badge.status-responded {
+  background: var(--c-user-bg, var(--c-accepted-bg));
+  color: var(--c-user, var(--c-accepted));
+}
 .badge.status-rejected {
   background: var(--c-rejected-bg);
   color: var(--c-rejected);
@@ -1186,6 +1190,9 @@ mark {
 }
 .map-node.status-qualified .map-node-status {
   color: var(--c-qualified);
+}
+.map-node.status-responded .map-node-status {
+  color: var(--c-user, var(--c-accepted));
 }
 .map-node.status-needs_user .map-node-status {
   color: var(--c-needs);

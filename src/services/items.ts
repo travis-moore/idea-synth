@@ -42,6 +42,7 @@ import {
 const USER_DECISIONS: readonly DecisionType[] = [
   'accept',
   'qualify',
+  'respond',
   'reject',
   'reopen',
   'mark_tangent',
@@ -74,19 +75,29 @@ export interface DecideInput {
   qualification?: string | undefined;
 }
 
-/** Accept, qualify, reject, reopen, or set aside as a tangent. The user's call; the discussion stays. */
+/**
+ * Accept, qualify, reject, reopen, respond, or set aside as a tangent. The user's call; the
+ * discussion stays. `respond` is for things the agent ASKED the user (a clarification, a
+ * value judgement, an ambiguity): the user's answer, in their words, resolves the request
+ * for attention and is also posted to the item's thread; it passes no verdict on the
+ * agent's wording.
+ */
 export async function decide(db: DbOrTrx, itemId: string, input: DecideInput) {
   if (!USER_DECISIONS.includes(input.decision))
     throw invalid(`Use the dedicated operation for "${input.decision}".`);
-  return inTransaction(db, (trx) =>
-    recordDecision(trx, {
+  if (input.decision === 'respond' && !input.rationale?.trim())
+    throw invalid('Write your response first; it is stored in your words.');
+  return inTransaction(db, async (trx) => {
+    if (input.decision === 'respond')
+      await postMessage(trx, { itemId, author: 'user', body: input.rationale! });
+    return recordDecision(trx, {
       itemId,
       type: input.decision,
       author: 'user',
       rationale: input.rationale,
       qualification: input.decision === 'qualify' ? input.qualification : null,
-    }),
-  );
+    });
+  });
 }
 
 export interface ChildInput {

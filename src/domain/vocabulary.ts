@@ -88,6 +88,8 @@ export const ITEM_STATUSES = [
   'needs_user',
   'accepted',
   'qualified',
+  /** The agent asked the user something and the user answered. Not a verdict on a claim. */
+  'responded',
   'rejected',
   'superseded',
   'merged',
@@ -98,7 +100,13 @@ export type ItemStatus = (typeof ITEM_STATUSES)[number];
 export const itemStatusSchema = z.enum(ITEM_STATUSES);
 
 /** Statuses that still take part in the main line of reasoning. */
-export const LIVE_STATUSES: readonly ItemStatus[] = ['open', 'needs_user', 'accepted', 'qualified'];
+export const LIVE_STATUSES: readonly ItemStatus[] = [
+  'open',
+  'needs_user',
+  'accepted',
+  'qualified',
+  'responded',
+];
 /** Statuses for which no conclusion has been reached. */
 export const UNRESOLVED_STATUSES: readonly ItemStatus[] = ['open', 'needs_user'];
 /** Live statuses plus tangents: the item is still "worth something". */
@@ -108,6 +116,12 @@ export const PRODUCTIVE_STATUSES: readonly ItemStatus[] = [...LIVE_STATUSES, 'ta
 export const DECISION_TYPES = [
   'accept',
   'qualify',
+  /**
+   * The user's answer to something the agent put to them (a clarification, a value
+   * judgement, an ambiguity). It resolves the request for attention with the user's own
+   * words and passes no verdict on the agent's wording.
+   */
+  'respond',
   'reject',
   'reopen',
   'flag_needs_user',
@@ -237,6 +251,13 @@ export const ATTENTION_REASONS = [
 ] as const;
 export type AttentionReason = (typeof ATTENTION_REASONS)[number];
 export const attentionReasonSchema = z.enum(ATTENTION_REASONS);
+
+/** Attention reasons that ask the user a QUESTION rather than for a verdict. */
+export const QUESTION_REASONS: readonly AttentionReason[] = [
+  'clarification_needed',
+  'value_judgment_input',
+  'ambiguous_interpretation',
+];
 
 /** Audit-log event types. */
 export const EVENT_TYPES = [

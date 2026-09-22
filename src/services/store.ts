@@ -260,6 +260,7 @@ export async function recordDecision(db: DbOrTrx, input: DecisionInput): Promise
     decision: input.type,
     author: input.author,
     qualification: input.qualification,
+    response: input.type === 'respond' ? input.rationale : null,
   });
   // A judgement call is always the user's. If an agent is the one executing it, it must
   // be carrying the user's own instruction, which is kept next to the decision.

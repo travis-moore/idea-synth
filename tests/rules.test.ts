@@ -127,3 +127,27 @@ describe('ids', () => {
     expect(new Set(ids).size).toBe(ids.length);
   });
 });
+
+describe('respond', () => {
+  const base = { kind: 'question', status: 'needs_user', author: 'user' } as const;
+  it("resolves a request for the user's input with their words, and needs them", () => {
+    expect(
+      statusAfterDecision({ ...base, decision: 'respond', response: 'I meant reading A.' }),
+    ).toBe('responded');
+    expect(() => statusAfterDecision({ ...base, decision: 'respond', response: ' ' })).toThrow(
+      /words/,
+    );
+    expect(() =>
+      statusAfterDecision({ ...base, decision: 'respond', author: 'agent', response: 'x' }),
+    ).toThrow(/belongs to the user/);
+    // A second response is allowed: the user may add to their answer.
+    expect(
+      statusAfterDecision({
+        ...base,
+        status: 'responded',
+        decision: 'respond',
+        response: 'And also B.',
+      }),
+    ).toBe('responded');
+  });
+});

@@ -28,6 +28,7 @@ const UNDECIDABLE_KINDS: readonly ItemKind[] = ['original_idea', 'synthesis'];
 const DECISION_TARGET: Record<DecisionType, ItemStatus> = {
   accept: 'accepted',
   qualify: 'qualified',
+  respond: 'responded',
   reject: 'rejected',
   reopen: 'open',
   flag_needs_user: 'needs_user',
@@ -50,6 +51,8 @@ export interface DecisionInput {
   decision: DecisionType;
   author: Author;
   qualification?: string | null | undefined;
+  /** For `respond`: the user's answer, in their words. */
+  response?: string | null | undefined;
 }
 
 /** Validate a decision and return the status it leads to. Throws DomainError if not allowed. */
@@ -74,11 +77,14 @@ export function statusAfterDecision(input: DecisionInput): ItemStatus {
   if (STRUCTURAL_STATUSES.includes(status)) {
     throw invalid(`Item is already ${status}; continue with the items it produced.`);
   }
+  if (decision === 'respond' && !input.response?.trim()) {
+    throw invalid("A response needs the user's words.");
+  }
   if (decision === 'qualify' && !input.qualification?.trim()) {
     throw invalid('A qualified acceptance needs the qualification spelled out.');
   }
   const target = DECISION_TARGET[decision];
-  if (target === status && decision !== 'qualify') {
+  if (target === status && decision !== 'qualify' && decision !== 'respond') {
     throw invalid(`Item is already ${status}.`);
   }
   return target;

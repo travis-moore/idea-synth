@@ -26,7 +26,7 @@ const SECTIONS: readonly Section[] = [
   {
     title: 'Resolved',
     hint: 'Decided into — or out of — your current reasoning. Not a claim about truth.',
-    statuses: ['accepted', 'qualified', 'rejected'],
+    statuses: ['accepted', 'qualified', 'responded', 'rejected'],
   },
   {
     title: 'Structural',

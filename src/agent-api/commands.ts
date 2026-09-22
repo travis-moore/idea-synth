@@ -427,7 +427,7 @@ export const commands = {
   // -------------------------------------------------------------------------------------
   'items.decide': command({
     description:
-      "Record the USER's decision on an item: accept, qualify (needs `qualification`), reject, reopen, mark_tangent, flag_needs_user. Requires meta.userInstruction with the user's own words. You may not decide on the user's behalf.",
+      "Record the USER's decision on an item: accept, qualify (needs `qualification`), reject, reopen, mark_tangent, flag_needs_user, or respond. Use `respond` (with `rationale` = the user's exact answer) when the item is something the agent ASKED the user (clarification_needed, value_judgment_input, ambiguous_interpretation, or an agent question): it resolves the item without any verdict on the agent's wording. Requires meta.userInstruction with the user's own words. You may not decide on the user's behalf.",
     mutating: true,
     input: z.object({
       meta: metaSchema,

@@ -59,6 +59,7 @@ export const STATUS_LABELS: Record<ItemStatus, string> = {
   needs_user: 'Needs you',
   accepted: 'Accepted',
   qualified: 'Accepted with qualification',
+  responded: 'Responded',
   rejected: 'Rejected',
   superseded: 'Superseded',
   merged: 'Merged',
@@ -75,6 +76,8 @@ export const STATUS_HINTS: Partial<Record<ItemStatus, string>> = {
   rejected: 'Rejected from your current reasoning. It stays in the record and can be reopened.',
   tangent: 'Set aside: interesting, but not part of this line of reasoning.',
   needs_user: 'The AI is asking for your judgement on this item.',
+  responded:
+    "You answered what the AI asked. Your words are in the discussion; no verdict was passed on the AI's wording.",
 };
 
 export const VERDICT_LABELS: Record<EpistemicVerdict, string> = {
@@ -144,6 +147,7 @@ export const ACTOR_LABELS: Record<Actor, string> = { user: 'You', agent: 'AI', s
 export const DECISION_LABELS: Record<DecisionType, string> = {
   accept: 'Accepted',
   qualify: 'Accepted with qualification',
+  respond: 'Responded',
   reject: 'Rejected',
   reopen: 'Reopened',
   flag_needs_user: 'Flagged for your attention',

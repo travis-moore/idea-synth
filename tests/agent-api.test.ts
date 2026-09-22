@@ -499,3 +499,62 @@ describe('VS Code agent as a first-class client', () => {
     });
   });
 });
+
+describe('respond: answering what the agent asked, without a verdict on its wording', () => {
+  it("resolves the item, posts the user's words to the thread, and unblocks the gate", async () => {
+    const { ideaId } = await run<{ ideaId: string }>('ideas.capture', {
+      meta: meta(),
+      text: PYRAMIDS_TEXT,
+      author: 'user',
+    });
+    for (let i = 0; i < 4; i++) await submitNext(ideaId);
+    const asked = (
+      await run<{ needsUser: Array<{ id: string; reason: string }> }>('ideas.context', { ideaId })
+    ).needsUser;
+    const question = asked.find((i) => i.reason === 'ambiguous_interpretation')!;
+    const value = asked.find((i) => i.reason === 'value_judgment_input')!;
+
+    await expect(
+      run('items.decide', {
+        meta: meta(),
+        itemId: question.id,
+        decision: 'respond',
+        rationale: 'I meant A.',
+      }),
+    ).rejects.toThrow(/Only the user can/);
+    await expect(
+      run('items.decide', {
+        meta: meta({ userInstruction: 'I meant A' }),
+        itemId: question.id,
+        decision: 'respond',
+      }),
+    ).rejects.toThrow(/response/i);
+    await run('items.decide', {
+      meta: meta({ userInstruction: 'I meant A, the project creates the capability' }),
+      itemId: question.id,
+      decision: 'respond',
+      rationale: ' I meant A, the project creates the capability ',
+    });
+    await run('items.decide', {
+      meta: meta({ userInstruction: 'useful = a demonstrable need' }),
+      itemId: value.id,
+      decision: 'respond',
+      rationale: 'useful = a demonstrable need',
+    });
+
+    const detail = await getItemDetail(db, question.id);
+    expect(detail.item.status).toBe('responded');
+    expect(detail.messages.at(-1)).toMatchObject({
+      author: 'user',
+      body: ' I meant A, the project creates the capability ',
+    });
+    expect(detail.decisions.at(-1)).toMatchObject({
+      type: 'respond',
+      author: 'user',
+      relayedBy: 'claude-code',
+    });
+    const gate = await run<{ blocking: Array<{ id: string }> }>('gate.check', { ideaId });
+    expect(gate.blocking.map((b) => b.id)).not.toContain(question.id);
+    expect(gate.blocking.map((b) => b.id)).not.toContain(value.id);
+  });
+});
